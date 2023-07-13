@@ -57,11 +57,10 @@ class TimeGapSplit:
         gap_duration=timedelta(0),
         n_splits=None,
         window="rolling",
+        stride=None,
     ):
         if (train_duration is None) and (n_splits is None):
-            raise ValueError(
-                "Either train_duration or n_splits have to be defined"
-            )
+            raise ValueError("Either train_duration or n_splits have to be defined")
 
         if (train_duration is not None) and (train_duration <= gap_duration):
             raise ValueError(
@@ -78,6 +77,7 @@ class TimeGapSplit:
         self.gap_duration = gap_duration
         self.n_splits = n_splits
         self.window = window
+        self.stride = stride
 
     def _join_date_and_x(self, X):
         """
@@ -85,9 +85,7 @@ class TimeGapSplit:
         and with the 'numpy index' column (i.e. just a range) that is required for the output and the rest of sklearn
         :param pandas.DataFrame X:
         """
-        X_index_df = pd.DataFrame(
-            range(len(X)), columns=["np_index"], index=X.index
-        )
+        X_index_df = pd.DataFrame(range(len(X)), columns=["np_index"], index=X.index)
         X_index_df = X_index_df.join(self.date_serie)
 
         return X_index_df
@@ -111,9 +109,7 @@ class TimeGapSplit:
 
         date_min = X_index_df["__date__"].min()
         date_max = X_index_df["__date__"].max()
-        date_length = (
-            X_index_df["__date__"].max() - X_index_df["__date__"].min()
-        )
+        date_length = X_index_df["__date__"].max() - X_index_df["__date__"].min()
 
         if (self.train_duration is None) and (self.n_splits is not None):
             self.train_duration = date_length - (
@@ -127,9 +123,13 @@ class TimeGapSplit:
                 "gap_duration is longer than train_duration, it should be shorter."
             )
 
+        if self.stride is None:
+            self.stride = self.valid_duration
+
         n_split_max = (
             date_length - self.train_duration - self.gap_duration
-        ) / self.valid_duration
+        ) / self.stride
+
         if self.n_splits:
             if n_split_max < self.n_splits:
                 raise ValueError(
@@ -145,16 +145,13 @@ class TimeGapSplit:
         # if the n_splits is smaller than what would usually be done for train val and gap duration,
         # the next fold is slightly further in time than just valid_duration
         if self.n_splits is not None:
-            time_shift = self.valid_duration * n_split_max / self.n_splits
+            time_shift = self.stride * n_split_max / self.n_splits
         else:
-            time_shift = self.valid_duration
+            time_shift = self.stride
 
         while True:
             if (
-                current_date
-                + self.train_duration
-                + time_shift
-                + self.gap_duration
+                current_date + self.train_duration + time_shift + self.gap_duration
                 > date_max
             ):
                 break
@@ -186,7 +183,6 @@ class TimeGapSplit:
             )
 
     def get_n_splits(self, X=None, y=None, groups=None):
-
         return sum(1 for x in self.split(X, y, groups))
 
     def summary(self, X):
@@ -350,8 +346,7 @@ class GroupTimeSeriesSplit(_BaseKFold):
             )
         except AttributeError:
             raise AttributeError(
-                ".summary() only works after having ran"
-                " .split(X, y, groups)."
+                ".summary() only works after having ran" " .split(X, y, groups)."
             )
 
     def split(self, X=None, y=None, groups=None):
@@ -484,13 +479,8 @@ class GroupTimeSeriesSplit(_BaseKFold):
 
         # initalize the index of the first split, to reduce the amount of possible index split options
         first_split_index = (
-            self._grouped_df.assign(
-                cumsum_obs=lambda df: df["observations"].cumsum()
-            )
-            .assign(
-                group_id=lambda df: (df["cumsum_obs"] - 1)
-                // init_ideal_group_size
-            )
+            self._grouped_df.assign(cumsum_obs=lambda df: df["observations"].cumsum())
+            .assign(group_id=lambda df: (df["cumsum_obs"] - 1) // init_ideal_group_size)
             .reset_index()
             .loc[lambda df: df["group_id"] != 0]
             .iloc[0]
@@ -503,10 +493,7 @@ class GroupTimeSeriesSplit(_BaseKFold):
                 cumsum_obs=lambda df: df["observations"].cumsum(),
             )
             .reset_index()
-            .assign(
-                group_id=lambda df: (df["cumsum_obs"] - 1)
-                // init_ideal_group_size
-            )
+            .assign(group_id=lambda df: (df["cumsum_obs"] - 1) // init_ideal_group_size)
             .loc[lambda df: df["group_id"] != 0]
             .iloc[0]
             .name
@@ -553,8 +540,7 @@ class GroupTimeSeriesSplit(_BaseKFold):
         for split in sliding_window(first_splits, window_size=2, step_size=1):
             try:
                 diff_from_ideal_list += [
-                    sum(observations[split[0] : split[1]])
-                    - self._ideal_group_size
+                    sum(observations[split[0] : split[1]]) - self._ideal_group_size
                 ]
             except IndexError:
                 diff_from_ideal_list += [
@@ -567,9 +553,7 @@ class GroupTimeSeriesSplit(_BaseKFold):
 
         # loop through all possible split points and check whether a new split
         # has a less total difference from all groups to the ideal group size
-        for prev_splits, new_splits in zip(
-            splits_generator, splits_generator_shifted
-        ):
+        for prev_splits, new_splits in zip(splits_generator, splits_generator_shifted):
             diff_from_ideal_list = self._calc_new_diffs(
                 observations, diff_from_ideal_list, prev_splits, new_splits
             )
@@ -643,9 +627,7 @@ class GroupTimeSeriesSplit(_BaseKFold):
         df = self._grouped_df.copy().reset_index()
         # set each unique group to the right group_id to group them into folds
         df.loc[: self._best_splits[0], "group"] = 0
-        for group_id, splits in enumerate(
-            sliding_window(self._best_splits, 2, 1)
-        ):
+        for group_id, splits in enumerate(sliding_window(self._best_splits, 2, 1)):
             try:
                 df.loc[splits[0] : splits[1], "group"] = group_id + 1
             except IndexError:
