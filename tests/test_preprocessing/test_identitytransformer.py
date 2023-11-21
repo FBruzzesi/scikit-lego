@@ -35,4 +35,4 @@ def test_nan_inf(random_xy_dataset_regr):
     X[np.random.ranf(size=X.shape) > 0.9] = np.nan
     X[np.random.ranf(size=X.shape) > 0.9] = -np.inf
     X[np.random.ranf(size=X.shape) > 0.9] = np.inf
-    X_new = IdentityTransformer(check_X=False).fit_transform(X)
+    _ = IdentityTransformer(check_X=False).fit_transform(X)

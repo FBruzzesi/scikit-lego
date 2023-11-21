@@ -4,6 +4,7 @@ from inspect import signature
 import numpy as np
 from sklearn.base import BaseEstimator, RegressorMixin, clone, is_classifier, is_regressor
 from sklearn.exceptions import NotFittedError
+from sklearn.utils.metaestimators import available_if
 from sklearn.utils.validation import check_array, check_is_fitted, check_X_y
 
 
@@ -28,6 +29,9 @@ class ZeroInflatedRegressor(BaseEstimator, RegressorMixin):
     regressor : scikit-learn compatible regressor
         A regressor for predicting the target. Its prediction is only used if `classifier` says that the output is
         non-zero.
+    predict_risk : bool, default=False
+        If True, it multiplies proba predictions from the classifier with regression values on the whole dataset.
+        Not that this is only possible if the classifier has a `predict_proba` method.
 
     Attributes
     ----------
@@ -60,9 +64,10 @@ class ZeroInflatedRegressor(BaseEstimator, RegressorMixin):
     ```
     """
 
-    def __init__(self, classifier, regressor) -> None:
+    def __init__(self, classifier, regressor, predict_risk = False) -> None:
         self.classifier = classifier
         self.regressor = regressor
+        self.predict_risk = predict_risk
 
     def fit(self, X, y, sample_weight=None):
         """Fit the underlying classifier and regressor using `X` and `y` as training data. The regressor is only trained
@@ -89,10 +94,17 @@ class ZeroInflatedRegressor(BaseEstimator, RegressorMixin):
         """
         X, y = check_X_y(X, y)
         self._check_n_features(X, reset=True)
+
         if not is_classifier(self.classifier):
             raise ValueError(
                 f"`classifier` has to be a classifier. Received instance of {type(self.classifier)} instead."
             )
+
+        if self.predict_risk and not hasattr(self.classifier, "predict_proba"):
+            raise ValueError(
+                "`predict_risk` is set to True but `classifier` does not have a `predict_proba` method."
+            )
+
         if not is_regressor(self.regressor):
             raise ValueError(f"`regressor` has to be a regressor. Received instance of {type(self.regressor)} instead.")
 
@@ -155,10 +167,33 @@ class ZeroInflatedRegressor(BaseEstimator, RegressorMixin):
         X = check_array(X)
         self._check_n_features(X, reset=False)
 
-        output = np.zeros(len(X))
-        non_zero_indices = np.where(self.classifier_.predict(X))[0]
+        if self.predict_risk:
+            output = self._predict_risk(X)
 
-        if non_zero_indices.size > 0:
-            output[non_zero_indices] = self.regressor_.predict(X[non_zero_indices])
+        else:
+            output = np.zeros(len(X))
+            non_zero_indices = np.where(self.classifier_.predict(X))[0]
+
+            if non_zero_indices.size > 0:
+                output[non_zero_indices] = self.regressor_.predict(X[non_zero_indices])
+
+        return output
+
+    @available_if(lambda self: hasattr(self.classifier, "predict_proba"))
+    def _predict_risk(self, X):
+        """Predict target values for `X` as the probability of the classifier times the prediction of the regressor.
+
+        Parameters
+        ----------
+        X : array-like of shape (n_samples, n_features)
+            The data to predict.
+
+        Returns
+        -------
+        array-like of shape (n_samples,)
+            The predicted values.
+        """
+        probas = self.classifier_.predict_proba(X)[:, 1]
+        output = self.regressor_.predict(X) * probas
 
         return output

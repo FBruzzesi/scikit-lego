@@ -262,7 +262,8 @@ class DeadZoneRegressor(BaseEstimator, RegressorMixin):
             outside the threshold are penalized linearly.
         - "quadratic": the errors within the threshold have no impact (their contribution is effectively zero), and
             errors outside the threshold are penalized quadratically (squared).
-        - "constant": the errors within the threshold have no impact, and errors outside the threshold are penalized with a constant value.
+        - "constant": the errors within the threshold have no impact, and errors outside the threshold are penalized
+            with a constant value.
     n_iter : int, default=2000
         The number of iterations to run the gradient descent algorithm.
     stepsize : float, default=0.01
