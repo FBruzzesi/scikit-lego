@@ -631,4 +631,4 @@ def test_has_decision_function():
 
     X, y = df.drop(columns="weight"), df["weight"]
     # This should NOT raise errors
-    GroupedPredictor(LogisticRegression(max_iter=2000), groups=["diet"]).fit(X, y).decision_function(X)
+    GroupedPredictor(LogisticRegression(max_iter=200), groups=["diet"]).fit(X, y).decision_function(X)

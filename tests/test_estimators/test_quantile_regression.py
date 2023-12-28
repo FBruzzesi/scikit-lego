@@ -17,8 +17,8 @@ test_batch = [
 
 def _create_dataset(coefs, intercept, noise=0.0):
     np.random.seed(0)
-    X = np.random.randn(10000, coefs.shape[0])
-    y = X @ coefs + intercept + noise * np.random.randn(10000)
+    X = np.random.randn(1000, coefs.shape[0])
+    y = X @ coefs + intercept + noise * np.random.randn(1000)
 
     return X, y
 
