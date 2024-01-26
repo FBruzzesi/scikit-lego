@@ -10,7 +10,7 @@ from tests.conftest import classifier_checks, general_checks, select_tests
 @pytest.fixture
 def random_xy_ordinal():
     np.random.seed(42)
-    X = np.random.normal(0, 2, (200, 3))
+    X = np.random.normal(0, 2, (1000, 3))
     y = np.select(condlist=[X[:, 0] < 2, X[:, 1] > 2], choicelist=[0, 2], default=1)
     return X, y
 

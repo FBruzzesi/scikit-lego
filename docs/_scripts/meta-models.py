@@ -492,3 +492,21 @@ ord_clf.predict_proba(X[0])
 # --8<-- [end:ordinal-classifier]
 
 print(ord_clf.predict_proba(X[0]))
+
+# --8<-- [start:ordinal-classifier-with-calibration]
+from sklearn.calibration import CalibratedClassifierCV
+from sklearn.linear_model import LogisticRegression
+from sklego.meta import OrdinalClassifier
+
+calibration_kwargs = {...}
+
+ord_clf = OrdinalClassifier(
+    estimator=LogisticRegression(),
+    use_calibration=True,
+    calibration_kwargs=calibration_kwargs
+)
+
+# This is equivalent to:
+estimator = CalibratedClassifierCV(LogisticRegression(), **calibration_kwargs)
+ord_clf = OrdinalClassifier(estimator)
+# --8<-- [end:ordinal-classifier-with-calibration]

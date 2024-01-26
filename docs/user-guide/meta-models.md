@@ -427,7 +427,11 @@ We are now ready to train a [`OrdinalClassifier`][ordinal-classifier-api] on thi
 
 The `OrdinalClassifier` emphasizes the importance of proper probability estimates for its functionality. It is recommended to use the [`CalibratedClassifierCV`][calibrated-classifier-api] class from scikit-learn to calibrate the probabilities of the binary classifiers.
 
-Probability calibration is enabled by default, but you can disable it by setting `use_calibration=False` and passing a pre-calibrated classifier to the OrdinalClassifier constructor.
+Probability calibration is _not_ enabled by default, but we provide a convenient keyword argument `use_calibration` to enable it as follows:
+
+```py title="OrdinalClassifier with probability calibration"
+--8<-- "docs/_scripts/meta-models.py:ordinal-classifier-with-calibration"
+```
 
 ### Computation Time
 

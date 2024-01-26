@@ -27,8 +27,9 @@ class OrdinalClassifier(MultiOutputMixin, ClassifierMixin, MetaEstimatorMixin, B
         more like a confidence score).
 
         We recommend to use `CalibratedClassifierCV` to calibrate the probabilities of the binary classifiers.
-        This is enabled by default, but can be disabled by setting `use_calibration=False` and passing a calibrated
-        classifier to the `OrdinalClassifier` constructor.
+
+        You can enable this by setting `use_calibration=True` and passing an uncalibrated classifier to the
+        `OrdinalClassifier` or by passing a calibrated classifier to the `OrdinalClassifier` constructor.
 
         More on this topic can be found in the [scikit-learn documentation](https://scikit-learn.org/stable/modules/calibration.html).
 
@@ -48,8 +49,10 @@ class OrdinalClassifier(MultiOutputMixin, ClassifierMixin, MetaEstimatorMixin, B
         - `n_jobs = None`: interpreted as n_jobs=1.
         - `n_jobs > 0`: n_cpus=n_jobs are used.
         - `n_jobs < 0`: (n_cpus + 1 + n_jobs) are used.
-    use_calibration : bool, default=True
+    use_calibration : bool, default=False
         Whether or not to calibrate the binary classifiers using `CalibratedClassifierCV`.
+    calibrarion_kwargs : dict | None, default=None
+        Keyword arguments to the `CalibratedClassifierCV` class, used only if `use_calibration=True`.
 
     Attributes
     ----------
@@ -63,12 +66,23 @@ class OrdinalClassifier(MultiOutputMixin, ClassifierMixin, MetaEstimatorMixin, B
     Examples
     --------
     ```py
-    from sklego.meta import OrdinalClassifier
+    import pandas as pd
+
     from sklearn.linear_model import LogisticRegression
+    from sklearn.model_selection import train_test_split
 
-    ...
+    from sklego.meta import OrdinalClassifier
 
-    clf = OrdinalClassifier(LogisticRegression())
+    url = "https://stats.idre.ucla.edu/stat/data/ologit.dta"
+    df = pd.read_stata(url).assign(apply_codes = lambda t: t["apply"].cat.codes)
+
+    target = "apply_codes"
+    features = [c for c in df.columns if c not in {target, "apply"}]
+
+    X, y = df[features].to_numpy(), df[target].to_numpy()
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+
+    clf = OrdinalClassifier(LogisticRegression(), n_jobs=-1)
     _ = clf.fit(X_train, y_train)
     clf.predict_proba(X_test)
     ```
@@ -80,10 +94,11 @@ class OrdinalClassifier(MultiOutputMixin, ClassifierMixin, MetaEstimatorMixin, B
 
     """
 
-    def __init__(self, estimator, *, n_jobs=None, use_calibration=True):
+    def __init__(self, estimator, *, n_jobs=None, use_calibration=False, **calibrarion_kwargs):
         self.estimator = estimator
         self.n_jobs = n_jobs
         self.use_calibration = use_calibration
+        self.calibrarion_kwargs = calibrarion_kwargs
 
     def fit(self, X, y):
         """Fit the `OrdinalClassifier` model on training data `X` and `y` by fitting its underlying estimators on
@@ -190,11 +205,10 @@ class OrdinalClassifier(MultiOutputMixin, ClassifierMixin, MetaEstimatorMixin, B
             The fitted binary classifier.
         """
         y_bin = (y <= y_label).astype(int)
-        fitted_model = clone(self.estimator).fit(X, y_bin)
         if self.use_calibration:
-            return CalibratedClassifierCV(fitted_model, cv="prefit").fit(X, y_bin)
+            return CalibratedClassifierCV(estimator=clone(self.estimator), **self.calibrarion_kwargs).fit(X, y_bin)
         else:
-            return fitted_model
+            return clone(self.estimator).fit(X, y_bin)
 
     def score(self, X, y):
         """Returns the accuracy score on the given test data and labels.
