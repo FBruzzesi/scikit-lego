@@ -1,3 +1,5 @@
+from warnings import warn
+
 import numpy as np
 import pandas as pd
 from sklearn import clone
@@ -73,6 +75,8 @@ class GroupedPredictor(BaseEstimator):
         "min_n_obs": min_n_obs_shrinkage,
     }
     _ALLOWED_FALLBACK = {"global", "next", "raise"}
+    _target_name = "__grouped_predictor_target_value__"
+    _global_name = "__grouped_predictor_global_model__"
 
     def __init__(
         self,
@@ -99,6 +103,7 @@ class GroupedPredictor(BaseEstimator):
 
     @property
     def n_levels_(self):
+        """Number of levels that were fitted"""
         check_is_fitted(self, ["fitted_levels_"])
         return len(self.fitted_levels_)
 
@@ -121,31 +126,42 @@ class GroupedPredictor(BaseEstimator):
         -------
         self : GroupedPredictor
             The fitted estimator.
-        """
 
-        # TODO: Validate class params?
+        Raises
+        -------
+        ValueError
+            - If `use_global_model` is not a boolean.
+            - If `check_X` is not a boolean.
+            - If group columns contain NaN values.
+            - If `shrinkage` is not one of `None`, `"constant"`, `"min_n_obs"`, `"relative"`, or a callable.
+            - If `fallback_method` is not one of `"global"`, `"next"`, or `"raise"`.
+        """
+        if not isinstance(self.use_global_model, bool):
+            raise ValueError(f"`use_global_model` should be a boolean, found {type(self.use_global_model)}")
+
+        if not isinstance(self.check_X, bool):
+            raise ValueError(f"`check_X` should be a boolean, found {type(self.check_X)}")
 
         if is_classifier(self.estimator):
-            self.classes_ = np.sort(np.unique(y))  # TODO: Must be sequential for the rest of the code to work
+            self.classes_ = np.sort(np.unique(y))
             self.n_classes_ = len(self.classes_)
 
         self.groups_ = as_list(self.groups)
 
-        # TODO: __grouped_predictor_target_value__?
-        frame = pd.DataFrame(X).assign(__target_value__=np.array(y)).reset_index(drop=True)
+        frame = pd.DataFrame(X).assign(**{self._target_name: np.array(y)}).reset_index(drop=True)
 
         self.__validate_inputs(frame)
 
         if self.use_global_model:
-            # TODO: __grouped_predictor_global_model__?
-            frame = frame.assign(__global_model__=1)
-            self.groups_ = ["__global_model__"] + self.groups_
+            frame = frame.assign(**{self._global_name: 1})
+            self.groups_ = [self._global_name] + self.groups_
 
         self.fitted_levels_ = self.__set_fit_levels()
+        self.shrinkage_function_ = self.__set_shrinkage_function()
 
         self.estimators_ = self.__fit_estimators(frame)
-        self.shrinkage_function_ = self.__set_shrinkage_function()
         self.shrinkage_factors_ = self.__fit_shrinkage_factors(frame)
+
         return self
 
     def predict(self, X):
@@ -208,17 +224,22 @@ class GroupedPredictor(BaseEstimator):
             In the binary case, confidence score for self.classes_[1] where > 0 means this class would be
             predicted.
         """
+        warn(
+            "`decision_function` will lead to inconsistent results in cases where the estimators are not all fitted "
+            "on the same target values.",
+            UserWarning,
+        )
         return self.__predict_estimators(X, method_name="decision_function")
 
     def __validate_inputs(self, frame):
         """Validate the input arrays"""
 
-        if frame.shape[1] <= len(self.groups_) + 1:
-            raise ValueError("`X` contains no features")
-
         if self.check_X:
-            X_values = frame.drop(columns=self.groups_ + ["__target_value__"]).copy()
+            X_values = frame.drop(columns=self.groups_ + [self._target_name]).copy()
             check_array(X_values, **self._check_kwargs)
+
+            # if frame.shape[1] <= len(self.groups_) + 1:
+            #     raise ValueError("`X` contains no features")
 
         X_groups = frame.loc[:, self.groups_].copy()
 
@@ -240,7 +261,7 @@ class GroupedPredictor(BaseEstimator):
         check_is_fitted(self, ["groups_"])
 
         if self.fallback_method == "raise":
-            levels_ = self.groups_ if self.shrinkage is None else expanding_list(self.groups_)
+            levels_ = [self.groups_] if self.shrinkage is None else expanding_list(self.groups_)
 
         elif self.fallback_method == "next":
             levels_ = expanding_list(self.groups_)
@@ -249,7 +270,7 @@ class GroupedPredictor(BaseEstimator):
             if not self.use_global_model:
                 raise ValueError("`fallback_method`='global' requires `use_global_model=True`")
             elif self.shrinkage is None:
-                levels_ = [["__global_model__"], self.groups_]
+                levels_ = [[self._global_name], self.groups_]
             else:
                 levels_ = expanding_list(self.groups_)
 
@@ -260,16 +281,14 @@ class GroupedPredictor(BaseEstimator):
 
     def __fit_estimators(self, frame):
         """Fit one estimator per level of the group column(s)"""
+
         estimators_ = {}
         for grp_names in self.fitted_levels_:
             for grp_values, grp_frame in frame.groupby(grp_names):
-                _X = grp_frame.drop(columns=self.groups_ + ["__target_value__"])
-                _y = grp_frame["__target_value__"]
+                _X = grp_frame.drop(columns=self.groups_ + [self._target_name])
+                _y = grp_frame[self._target_name]
 
-                if _y.isnull().all():
-                    estimators_[grp_values] = clone(self.estimator).fit(_X)  # TODO: or .fit(_X, None) ?
-                else:
-                    estimators_[grp_values] = clone(self.estimator).fit(_X, _y)
+                estimators_[grp_values] = clone(self.estimator).fit(_X, _y)
 
         return estimators_
 
@@ -291,10 +310,7 @@ class GroupedPredictor(BaseEstimator):
         }
 
         # Normalize and pad
-        return {
-            grp_value: np.pad(shrink_array / shrink_array.sum(), (0, max(0, self.n_levels_ - shrink_array.size)))
-            for grp_value, shrink_array in shrinkage_factors.items()
-        }
+        return {grp_value: shrink_array / shrink_array.sum() for grp_value, shrink_array in shrinkage_factors.items()}
 
     def __set_shrinkage_function(self):
         """Set the shrinkage function and validate it if it is a custom callable"""
@@ -310,7 +326,37 @@ class GroupedPredictor(BaseEstimator):
             shrinkage_function_ = self.shrinkage
 
         elif self.shrinkage is None:
-            shrinkage_function_ = lambda x: np.pad(np.zeros(self.n_levels_ - 1), pad_width=(0, 1), constant_values=1)
+            """Instead of keeping two different behaviors for shrinkage and non-shrinkage cases, this conditional block
+            maps no shrinkage to a constant shrinkage function, wit  all the weight on the grouped passed,
+            independently from the level sizes, as expected from the other shrinkage functions (*).
+            This allows the rest of the code to be agnostic to the shrinkage function, and the shrinkage factors.
+
+            (*) Consider the following example:
+
+            - groups = ["a", "b"] with values (0, 0), (0, 1) and (1, 0) of respective sizes 6, 5, 9.
+            - Considering these sizes, in `__fit_shrinkage_factors` the hierarchical_counts will be:
+                - (0, 0): [11, 6]
+                - (0, 1): [11, 5]
+                - (1, 0): [9, 9]
+            - For `shrinkage = "relative"`, we get the following shrinkage factors:
+                {
+                    (0,): array([1., 0.]),
+                    (1,): array([1., 0.]),
+                    (0, 0): array([0.64705882, 0.35294118]),
+                    (0, 1): array([0.6875, 0.3125]),
+                    (1, 0): array([0.5, 0.5]),
+                }
+            - For `shrinkage = None`, we get the following shrinkage factors:
+                {
+                    (0,): array([1., 0.]),
+                    (1,): array([1., 0.]),
+                    (0, 0): array([0., 1.]),
+                    (0, 1): array([0., 1.]),
+                    (1, 0): array([0., 1.]),
+                }
+            """
+            n = len(self.fitted_levels_[-1])
+            shrinkage_function_ = lambda x: np.lib.pad([1], (len(x) - 1, n - len(x)), "constant", constant_values=(0))
 
         else:
             raise ValueError(f"`shrinkage` should be either `None`, {self._ALLOWED_SHRINKAGE.keys()}, or a callable")
@@ -337,11 +383,18 @@ class GroupedPredictor(BaseEstimator):
         frame = pd.DataFrame(X).reset_index(drop=True)
 
         if self.use_global_model:
-            frame = frame.assign(__global_model__=1)
+            frame = frame.assign(**{self._global_name: 1})
 
-        depth = getattr(self, "n_classes_", 1)
+        if not is_classifier(self.estimator):
+            n_out = 1
+        else:
+            if self.n_classes_ > 2 or method_name == "predict_proba":
+                n_out = self.n_classes_
+            else:
+                # binary case with `method_name = "decision_function"`
+                n_out = 1
 
-        preds = np.zeros((X.shape[0], self.n_levels_, depth), dtype=float)
+        preds = np.zeros((X.shape[0], self.n_levels_, n_out), dtype=float)
         shrinkage = np.zeros((X.shape[0], self.n_levels_), dtype=float)
 
         for level_idx, grp_names in enumerate(self.fitted_levels_):

@@ -41,7 +41,7 @@ class OrdinalClassifier(MultiOutputMixin, ClassifierMixin, MetaEstimatorMixin, B
     ----------
     estimator : scikit-learn compatible classifier
         The estimator to be applied to the data, used as binary classifier.
-    n_jobs : int, default=None
+    n_jobs : int | None, default=None
         The number of jobs to run in parallel. The same convention of [`joblib.Parallel`](https://joblib.readthedocs.io/en/latest/generated/joblib.Parallel.html)
         holds:
 
