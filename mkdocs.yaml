@@ -156,6 +156,7 @@ nav:
     - Pipeline: api/pipeline.md
     - Preprocessing: api/preprocessing.md
   - This: this.md
+  - Releases: changelog.md
 
 not_in_nav: |
   _static
