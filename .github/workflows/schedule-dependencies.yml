@@ -35,7 +35,7 @@ jobs:
         uv pip freeze
     - name: Test base
       run: |
-        pytest -n auto --disable-warnings --cov=sklego -m "not cvxpy" -m "not formulaic" -m "not umap"
+        pytest -n auto --disable-warnings --cov=sklego -m "not cvxpy and not formulaic and not umap"
 
     - name: Install cvxpy dependencies
       run: |
