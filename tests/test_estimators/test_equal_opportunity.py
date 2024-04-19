@@ -7,6 +7,8 @@ from sklego.linear_model import EqualOpportunityClassifier
 from sklego.metrics import equal_opportunity_score
 from tests.conftest import classifier_checks, general_checks, nonmeta_checks, select_tests
 
+pytestmark = pytest.mark.cvxpy
+
 
 @pytest.mark.parametrize(
     "test_fn",

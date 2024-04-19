@@ -5,6 +5,8 @@ from sklego.common import flatten
 from sklego.linear_model import ProbWeightRegression
 from tests.conftest import general_checks, nonmeta_checks, regressor_checks, select_tests
 
+pytestmark = pytest.mark.cvxpy
+
 
 @pytest.mark.parametrize(
     "test_fn",

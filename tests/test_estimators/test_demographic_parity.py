@@ -12,6 +12,8 @@ from sklego.linear_model import DemographicParityClassifier
 from sklego.metrics import p_percent_score
 from tests.conftest import classifier_checks, general_checks, nonmeta_checks, select_tests
 
+pytestmark = pytest.mark.cvxpy
+
 
 @pytest.mark.parametrize(
     "test_fn",
