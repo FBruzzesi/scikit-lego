@@ -10,7 +10,6 @@ from sklego.model_selection import WithoutLiersCV
 )
 @pytest.mark.parametrize("anomalous_label", [-1, 1])
 def test_split_without_anomalies(cv_strategy, anomalous_label):
-
     size = 1000
 
     X = np.random.randn(size, 3)
@@ -21,8 +20,8 @@ def test_split_without_anomalies(cv_strategy, anomalous_label):
 
     cv = WithoutLiersCV(cv_strategy, anomalous_label=anomalous_label)
 
-    for inliner_index, test_index in cv.split(X, y, groups):
-        y_train = y[inliner_index]
+    for train_index, _ in cv.split(X, y, groups):
+        y_train = y[train_index]
         assert np.all(y_train != anomalous_label)
 
     assert cv.get_n_splits(X, y, groups) == cv_strategy.get_n_splits(X, y, groups)
