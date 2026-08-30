@@ -20,7 +20,22 @@
         show_root_full_path: true
         show_root_heading: true
 
+::: sklego.meta.grouped_predictor.GroupedClassifier
+    options:
+        show_root_full_path: true
+        show_root_heading: true
+
+::: sklego.meta.grouped_predictor.GroupedRegressor
+    options:
+        show_root_full_path: true
+        show_root_heading: true
+
 ::: sklego.meta.grouped_transformer.GroupedTransformer
+    options:
+        show_root_full_path: true
+        show_root_heading: true
+
+::: sklego.meta.ordinal_classification.OrdinalClassifier
     options:
         show_root_full_path: true
         show_root_heading: true
@@ -46,6 +61,21 @@
         show_root_heading: true
 
 ::: sklego.meta.zero_inflated_regressor.ZeroInflatedRegressor
+    options:
+        show_root_full_path: true
+        show_root_heading: true
+
+::: sklego.meta.hierarchical_predictor.HierarchicalPredictor
+    options:
+        show_root_full_path: true
+        show_root_heading: true
+
+::: sklego.meta.hierarchical_predictor.HierarchicalClassifier
+    options:
+        show_root_full_path: true
+        show_root_heading: true
+
+::: sklego.meta.hierarchical_predictor.HierarchicalRegressor
     options:
         show_root_full_path: true
         show_root_heading: true

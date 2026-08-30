@@ -1,13 +1,13 @@
+import numpy as np
 import pytest
 from sklearn import clone
 from sklearn.base import BaseEstimator
-
-from sklego.model_selection import KlusterFoldValidation
 from sklearn.cluster import KMeans, MiniBatchKMeans
-from tests.conftest import id_func
 from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import StandardScaler
-import numpy as np
+
+from sklego.model_selection import ClusterFoldValidation
+from tests.conftest import id_func
 
 k_means_pipeline = make_pipeline(StandardScaler(), KMeans())
 
@@ -34,7 +34,7 @@ class DummyCluster(BaseEstimator):
 def test_splits_not_fitted(cluster_method, random_xy_dataset_regr):
     cluster_method = clone(cluster_method)
     X, y = random_xy_dataset_regr
-    kf = KlusterFoldValidation(cluster_method=cluster_method)
+    kf = ClusterFoldValidation(cluster_method=cluster_method)
     for train_index, test_index in kf.split(X):
         assert len(train_index) > 0
         assert len(test_index) > 0
@@ -49,7 +49,7 @@ def test_splits_fitted(cluster_method, random_xy_dataset_regr):
     cluster_method = clone(cluster_method)
     X, y = random_xy_dataset_regr
     cluster_method = cluster_method.fit(X)
-    kf = KlusterFoldValidation(cluster_method=cluster_method)
+    kf = ClusterFoldValidation(cluster_method=cluster_method)
     for train_index, test_index in kf.split(X):
         assert len(train_index) > 0
         assert len(test_index) > 0
@@ -59,7 +59,7 @@ def test_no_split(random_xy_dataset_regr):
     X, y = random_xy_dataset_regr
     # With only one split, the method should raise a ValueError
     cluster_method = DummyCluster(n_splits=1)
-    kf = KlusterFoldValidation(cluster_method=cluster_method)
+    kf = ClusterFoldValidation(cluster_method=cluster_method)
     with pytest.raises(ValueError):
         for train_index, test_index in kf.split(X):
             assert len(train_index) > 0

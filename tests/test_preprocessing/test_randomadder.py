@@ -1,31 +1,21 @@
 import numpy as np
 import pytest
 from sklearn.model_selection import train_test_split
+from sklearn.utils.estimator_checks import parametrize_with_checks
 
-from sklego.common import flatten
 from sklego.preprocessing import RandomAdder
 
 
-from tests.conftest import select_tests, transformer_checks, nonmeta_checks, general_checks
+@parametrize_with_checks([RandomAdder()])
+def test_sklearn_compatible_estimator(estimator, check):
+    if check.func.__name__ in {
+        "check_transformer_data_not_an_array",  # hash only supports a few types
+        "check_pipeline_consistency",  # RandomAdder is non deterministic
+        "check_transformer_general",  # RandomAdder is non deterministic
+    }:
+        pytest.skip("RandomAdder is a TrainOnlyTransformer")
 
-
-@pytest.mark.parametrize(
-    "test_fn",
-    select_tests(
-        flatten([general_checks, transformer_checks, nonmeta_checks]),
-        exclude=[
-            "check_sample_weights_invariance",
-            "check_methods_subset_invariance",
-            "check_transformer_data_not_an_array",
-            "check_transformer_general",
-            "check_sample_weights_list",
-            "check_sample_weights_pandas_series"
-        ]
-    )
-)
-def test_estimator_checks(test_fn):
-    adder = RandomAdder()
-    test_fn(RandomAdder.__name__, adder)
+    check(estimator)
 
 
 def test_dtype_regression(random_xy_dataset_regr):

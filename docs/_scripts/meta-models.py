@@ -67,9 +67,9 @@ plt.savefig(_static_path / "threshold-chart.png")
 plt.clf()
 
 # --8<-- [start:cross-validation-no-refit]
-# %%time 
+# %%time
 
-# Train an original model 
+# Train an original model
 orig_model = LogisticRegression(solver="lbfgs")
 orig_model.fit(X, y)
 
@@ -111,7 +111,7 @@ from sklego.preprocessing import ColumnSelector
 
 def plot_model(model):
     df = load_chicken(as_frame=True)
-    
+
     _ = model.fit(df[["diet", "time"]], df["weight"])
     metric_df = (df[["diet", "time", "weight"]]
         .assign(pred=lambda d: model.predict(d[["diet", "time"]]))
@@ -132,7 +132,7 @@ feature_pipeline = Pipeline([
     ("datagrab", FeatureUnion([
          ("discrete", Pipeline([
              ("grab", ColumnSelector("diet")),
-             ("encode", OneHotEncoder(categories="auto", sparse=False))
+             ("encode", OneHotEncoder(categories="auto"))
          ])),
          ("continuous", Pipeline([
              ("grab", ColumnSelector("time")),
@@ -265,8 +265,15 @@ from sklego.meta import GroupedPredictor, DecayEstimator
 mod1 = (GroupedPredictor(DummyRegressor(), groups=["m"])
         .fit(df[["m"]], df["yt"]))
 
-mod2 = (GroupedPredictor(DecayEstimator(DummyRegressor(), decay_func="exponential", decay_rate=0.9), groups=["m"])
-        .fit(df[["index", "m"]], df["yt"]))
+mod2 = (GroupedPredictor(
+    estimator=DecayEstimator(
+        model=DummyRegressor(),
+        decay_func="exponential",
+        decay_kwargs={"decay_rate": 0.9}
+    ),
+    groups=["m"]
+    ).fit(df[["index", "m"]], df["yt"])
+)
 
 plt.figure(figsize=(12, 3))
 plt.plot(df["yt"], alpha=0.5);
@@ -280,7 +287,7 @@ plt.clf()
 
 
 # --8<-- [start:decay-functions]
-from sklego.meta._decay_utils import exponential_decay, linear_decay, sigmoid_decay, stepwise_decay 
+from sklego.meta._decay_utils import exponential_decay, linear_decay, sigmoid_decay, stepwise_decay
 
 fig = plt.figure(figsize=(12, 6))
 
@@ -312,13 +319,13 @@ cmap=sns.color_palette("flare", as_cmap=True)
 np.random.seed(42)
 
 n1, n2, n3 = 100, 500, 50
-X = np.concatenate([np.random.normal(0, 1, (n1, 2)), 
+X = np.concatenate([np.random.normal(0, 1, (n1, 2)),
                     np.random.normal(2, 1, (n2, 2)),
-                    np.random.normal(3, 1, (n3, 2))], 
+                    np.random.normal(3, 1, (n3, 2))],
                    axis=0)
-y = np.concatenate([np.zeros((n1, 1)), 
+y = np.concatenate([np.zeros((n1, 1)),
                     np.ones((n2, 1)),
-                    np.zeros((n3, 1))], 
+                    np.zeros((n3, 1))],
                    axis=0).reshape(-1)
 plt.scatter(X[:, 0], X[:, 1], c=y, cmap=cmap);
 # --8<-- [end:make-blobs]
@@ -360,7 +367,7 @@ from sklego.meta import ConfusionBalancer
 cf_mod = ConfusionBalancer(LogisticRegression(solver="lbfgs", max_iter=1000), alpha=1.0)
 
 grid = GridSearchCV(
-    cf_mod, 
+    cf_mod,
     param_grid={"alpha": np.linspace(-1.0, 3.0, 31)},
     scoring={
         "accuracy": make_scorer(accuracy_score),
@@ -400,22 +407,30 @@ plt.clf()
 
 # --8<-- [start:zero-inflated]
 import numpy as np
-from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
+from sklearn.ensemble import ExtraTreesClassifier, ExtraTreesRegressor
 from sklearn.model_selection import cross_val_score
+
 from sklego.meta import ZeroInflatedRegressor
 
 np.random.seed(0)
 X = np.random.randn(10000, 4)
-y = ((X[:, 0]>0) & (X[:, 1]>0)) * np.abs(X[:, 2] * X[:, 3]**2) # many zeroes here, in about 75% of the cases.
+y = ((X[:, 0]>0) & (X[:, 1]>0)) * np.abs(X[:, 2] * X[:, 3]**2)
 
 zir = ZeroInflatedRegressor(
-    classifier=RandomForestClassifier(random_state=0),
-    regressor=RandomForestRegressor(random_state=0)
+    classifier=ExtraTreesClassifier(random_state=0, max_depth=10),
+    regressor=ExtraTreesRegressor(random_state=0)
 )
 
 print("ZIR (RFC+RFR) r²:", cross_val_score(zir, X, y).mean())
-print("RFR r²:", cross_val_score(RandomForestRegressor(random_state=0), X, y).mean())
+print("RFR r²:", cross_val_score(ExtraTreesRegressor(random_state=0), X, y).mean())
 # --8<-- [end:zero-inflated]
+
+
+# --8<-- [start:zero-inflated-score-samples]
+_ = zir.fit(X, y)
+print(f"Predict={zir.predict(X[:5]).round(2)}")
+print(f"Scores={zir.score_samples(X[:5]).round(2)}")
+# --8<-- [end:zero-inflated-score-samples]
 
 # --8<-- [start:outlier-classifier]
 import numpy as np
@@ -465,3 +480,52 @@ stacker.fit(X,y)
 from sklearn.utils import estimator_html_repr
 with open(_static_path / "outlier-classifier-stacking.html", "w") as f:
     f.write(estimator_html_repr(stacker))
+
+# --8<-- [start:ordinal-classifier-data]
+import pandas as pd
+
+url = "https://stats.idre.ucla.edu/stat/data/ologit.dta"
+df = pd.read_stata(url).assign(apply_codes = lambda t: t["apply"].cat.codes)
+
+target = "apply_codes"
+features = [c for c in df.columns if c not in {target, "apply"}]
+
+X, y = df[features].to_numpy(), df[target].to_numpy()
+df.head()
+# --8<-- [end:ordinal-classifier-data]
+
+with open(_static_path / "ordinal_data.md", "w") as f:
+    f.write(df.head().to_markdown(index=False))
+
+# --8<-- [start:ordinal-classifier]
+from sklearn.linear_model import LogisticRegression
+from sklego.meta import OrdinalClassifier
+
+ord_clf = OrdinalClassifier(
+    LogisticRegression(),
+    n_jobs=-1,
+    use_calibration=False,
+    ).fit(X, y)
+
+ord_clf.predict_proba(X[:1])
+# --8<-- [end:ordinal-classifier]
+
+print(ord_clf.predict_proba(X[:1]))
+
+# --8<-- [start:ordinal-classifier-with-calibration]
+from sklearn.calibration import CalibratedClassifierCV
+from sklearn.linear_model import LogisticRegression
+from sklego.meta import OrdinalClassifier
+
+calibration_kwargs = {...}
+
+ord_clf = OrdinalClassifier(
+    estimator=LogisticRegression(),
+    use_calibration=True,
+    calibration_kwargs=calibration_kwargs
+)
+
+# This is equivalent to:
+estimator = CalibratedClassifierCV(LogisticRegression(), **calibration_kwargs)
+ord_clf = OrdinalClassifier(estimator)
+# --8<-- [end:ordinal-classifier-with-calibration]

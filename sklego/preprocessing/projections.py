@@ -1,13 +1,13 @@
+import narwhals.stable.v1 as nw
 import numpy as np
-import pandas as pd
 from sklearn.base import BaseEstimator, TransformerMixin
-from sklearn.utils import check_array
 from sklearn.utils.validation import check_is_fitted
+from sklearn_compat.utils.validation import validate_data
 
 from sklego.common import as_list
 
 
-class OrthogonalTransformer(BaseEstimator, TransformerMixin):
+class OrthogonalTransformer(TransformerMixin, BaseEstimator):
     r"""The `OrthogonalTransformer` transforms the columns of a dataframe or numpy array to orthogonal (or
     orthonormal if `normalize=True`) matrix.
 
@@ -27,7 +27,7 @@ class OrthogonalTransformer(BaseEstimator, TransformerMixin):
 
     Examples
     --------
-    ```
+    ```py
     from sklearn.datasets import make_regression
     from sklego.preprocessing import OrthogonalTransformer
 
@@ -66,10 +66,7 @@ class OrthogonalTransformer(BaseEstimator, TransformerMixin):
         self : OrthogonalTransformer
             The fitted transformer.
         """
-        X = check_array(X, estimator=self)
-
-        if not X.shape[0] > 1:
-            raise ValueError("Orthogonal transformation not valid for one sample")
+        X = validate_data(self, X=X, ensure_min_samples=2, reset=True)
 
         # Q, R such that X = Q*R, with Q orthogonal, from which follows Q = X*inv(R)
         Q, R = np.linalg.qr(X)
@@ -79,7 +76,7 @@ class OrthogonalTransformer(BaseEstimator, TransformerMixin):
             self.normalization_vector_ = np.linalg.norm(Q, ord=2, axis=0)
         else:
             self.normalization_vector_ = np.ones((X.shape[1],))
-
+        self.n_features_in_ = X.shape[1]
         return self
 
     def transform(self, X):
@@ -95,12 +92,13 @@ class OrthogonalTransformer(BaseEstimator, TransformerMixin):
         array-like of shape (n_samples, n_features)
             The transformed data.
         """
+
         if self.normalize:
             check_is_fitted(self, ["inv_R_", "normalization_vector_"])
         else:
             check_is_fitted(self, ["inv_R_"])
 
-        X = check_array(X, estimator=self)
+        X = validate_data(self, X=X, reset=False)
 
         return X @ self.inv_R_ / self.normalization_vector_
 
@@ -113,7 +111,7 @@ def vector_projection(vec, unto):
     return scalar_projection(vec, unto) * unto
 
 
-class InformationFilter(BaseEstimator, TransformerMixin):
+class InformationFilter(TransformerMixin, BaseEstimator):
     r"""The `InformationFilter` transformer uses a variant of the
     [Gram-Schmidt process](https://en.wikipedia.org/wiki/Gram%E2%80%93Schmidt_process) to filter information out of the
     dataset.
@@ -155,7 +153,27 @@ class InformationFilter(BaseEstimator, TransformerMixin):
         The projection matrix that can be used to filter information out of a dataset.
     col_ids_ : List[int] of length `len(columns)`
         The list of column ids of the sensitive columns.
+
+    Examples
+    --------
+    ```py
+    import pandas as pd
+    from sklego.preprocessing import InformationFilter
+
+    df = pd.DataFrame({
+        "user_id": [101, 102, 103],
+        "length": [1.82, 1.85, 1.80],
+        "age": [21, 37, 45]
+    })
+
+    InformationFilter(columns=["length", "age"], alpha=0.5).fit_transform(df)
+    # array([[50.10152483,  3.87905643],
+    #        [50.26253897, 19.59684308],
+    #        [52.66084873, 28.06719867]])
+    ```
     """
+
+    _required_parameters = ["columns"]
 
     def __init__(self, columns, alpha=1):
         self.columns = columns
@@ -163,16 +181,17 @@ class InformationFilter(BaseEstimator, TransformerMixin):
 
     def _check_coltype(self, X):
         """Check if the `columns` type(s) are compatible with `X` type."""
+        X_ = nw.from_native(X, strict=False, eager_only=True)
         for col in as_list(self.columns):
             if isinstance(col, str):
-                if isinstance(X, np.ndarray):
+                if isinstance(X_, np.ndarray):
                     raise ValueError(f"column {col} is a string but datatype receive is numpy.")
-                if isinstance(X, pd.DataFrame):
-                    if col not in X.columns:
-                        raise ValueError(f"column {col} is not in {X.columns}")
+                if isinstance(X_, nw.DataFrame):
+                    if col not in X_.columns:
+                        raise ValueError(f"column {col} is not in {X_.columns}")
             if isinstance(col, int):
-                if col not in range(np.atleast_2d(np.array(X)).shape[1]):
-                    raise ValueError(f"column {col} is out of bounds for input shape {X.shape}")
+                if col not in range(np.atleast_2d(np.array(X_)).shape[1]):
+                    raise ValueError(f"column {col} is out of bounds for input shape {X_.shape}")
 
     def _col_idx(self, X, name):
         """Get the column index of a column name."""
@@ -214,7 +233,8 @@ class InformationFilter(BaseEstimator, TransformerMixin):
         """
         self._check_coltype(X)
         self.col_ids_ = [v if isinstance(v, int) else self._col_idx(X, v) for v in as_list(self.columns)]
-        X = check_array(X, estimator=self)
+        X = validate_data(self, X=X, reset=True)
+
         X_fair = X.copy()
         v_vectors = self._make_v_vectors(X, self.col_ids_)
         # gram smidt process but only on sensitive attributes
@@ -224,6 +244,8 @@ class InformationFilter(BaseEstimator, TransformerMixin):
         # we want to learn matrix P: X P = X_fair
         # this means we first need to create X_fair in order to learn P
         self.projection_, resid, rank, s = np.linalg.lstsq(X, X_fair, rcond=None)
+        self.n_features_in_ = X.shape[1]
+
         return self
 
     def transform(self, X):
@@ -246,7 +268,8 @@ class InformationFilter(BaseEstimator, TransformerMixin):
         """
         check_is_fitted(self, ["projection_", "col_ids_"])
         self._check_coltype(X)
-        X = check_array(X, estimator=self)
+        X = validate_data(self, X=X, reset=False)
+
         # apply the projection and remove the column we won't need
         X_fair = X @ self.projection_
         X_removed = np.delete(X_fair, self.col_ids_, axis=1)

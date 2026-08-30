@@ -9,8 +9,8 @@ from warnings import warn
 
 import numpy as np
 from sklearn.base import BaseEstimator, TransformerMixin
-from sklearn.utils import check_array, check_X_y
 from sklearn.utils.validation import check_is_fitted
+from sklearn_compat.utils.validation import validate_data
 
 
 def _mk_monotonic_average(xs, ys, intervals, method="increasing", **kwargs):
@@ -41,9 +41,7 @@ def _mk_monotonic_average(xs, ys, intervals, method="increasing", **kwargs):
     elif method == "decreasing":
         constraints = [betas[i + 1] <= 0 for i in range(betas.shape[0] - 1)]
     else:
-        raise ValueError(
-            f"method must be either `increasing` or `decreasing`, got: {method}"
-        )
+        raise ValueError(f"method must be either `increasing` or `decreasing`, got: {method}")
     prob = cp.Problem(objective, constraints)
     prob.solve()
     return betas.value.cumsum()
@@ -75,7 +73,7 @@ def _mk_average(xs, ys, intervals, method="average", span=1, **kwargs):
     for idx, interval in enumerate(intervals):
         if method == "average":
             distances = 1 / (0.01 + np.abs(xs - interval))
-            predicate = (xs < (interval + span)) | (xs < (interval - span))
+            predicate = (xs < (interval + span)) & (xs > (interval - span))
         elif method == "normal":
             distances = np.exp(-((xs - interval) ** 2) / span)
             predicate = xs == xs
@@ -148,38 +146,27 @@ class IntervalEncoder(TransformerMixin, BaseEstimator):
         """
 
         if self.method not in self._ALLOWED_METHODS:
-            raise ValueError(
-                f"`method` must be in {self._ALLOWED_METHODS}, got `{self.method}`"
-            )
+            raise ValueError(f"`method` must be in {self._ALLOWED_METHODS}, got `{self.method}`")
         if self.n_chunks <= 0:
             raise ValueError(f"`n_chunks` must be >= 1, received {self.n_chunks}")
         if self.span > 1.0:
-            raise ValueError(
-                f"Error, we expect 0 <= span <= 1, received span={self.span}"
-            )
+            raise ValueError(f"Error, we expect 0 <= span <= 1, received span={self.span}")
         if self.span < 0.0:
-            raise ValueError(
-                f"Error, we expect 0 <= span <= 1, received span={self.span}"
-            )
+            raise ValueError(f"Error, we expect 0 <= span <= 1, received span={self.span}")
 
         # these two matrices will have shape (columns, quantiles)
         # quantiles indicate where the interval split occurs
-        X, y = check_X_y(X, y, estimator=self)
+        X, y = validate_data(self, X=X, y=y, reset=True)
+
         self.quantiles_ = np.zeros((X.shape[1], self.n_chunks))
         # heights indicate what heights these intervals will have
         self.heights_ = np.zeros((X.shape[1], self.n_chunks))
         self.n_features_in_ = X.shape[1]
 
-        average_func = (
-            _mk_average
-            if self.method in ["average", "normal"]
-            else _mk_monotonic_average
-        )
+        average_func = _mk_average if self.method in ["average", "normal"] else _mk_monotonic_average
 
         for col in range(X.shape[1]):
-            self.quantiles_[col, :] = np.quantile(
-                X[:, col], q=np.linspace(0, 1, self.n_chunks)
-            )
+            self.quantiles_[col, :] = np.quantile(X[:, col], q=np.linspace(0, 1, self.n_chunks))
             self.heights_[col, :] = average_func(
                 X[:, col],
                 y,
@@ -208,16 +195,11 @@ class IntervalEncoder(TransformerMixin, BaseEstimator):
             If the number of columns from `X` differs from the number of columns when fitting.
         """
         check_is_fitted(self, ["quantiles_", "heights_", "n_features_in_"])
-        X = check_array(X, estimator=self)
-        if X.shape[1] != self.n_features_in_:
-            raise ValueError(
-                f"fitted on {self.n_features_in_} features but received {X.shape[1]}"
-            )
+        X = validate_data(self, X=X, reset=False)
+
         transformed = np.zeros(X.shape)
         for col in range(transformed.shape[1]):
-            transformed[:, col] = np.interp(
-                X[:, col], self.quantiles_[col, :], self.heights_[col, :]
-            )
+            transformed[:, col] = np.interp(X[:, col], self.quantiles_[col, :], self.heights_[col, :])
         return transformed
 
     @property

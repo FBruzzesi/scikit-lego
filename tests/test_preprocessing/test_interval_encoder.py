@@ -1,37 +1,15 @@
-import pytest
 import numpy as np
-from sklearn.utils import estimator_checks
+import pytest
+from sklearn.utils.estimator_checks import parametrize_with_checks
 
-from sklego.common import flatten
 from sklego.preprocessing import IntervalEncoder
-from tests.conftest import transformer_checks, general_checks
+
+pytestmark = pytest.mark.cvxpy
 
 
-@pytest.mark.parametrize(
-    "test_fn",
-    flatten(
-        [
-            transformer_checks,
-            general_checks,
-            estimator_checks.check_estimators_dtypes,
-            estimator_checks.check_fit_score_takes_y,
-            # estimator_checks.check_dtype_object,
-            # estimator_checks.check_sample_weights_pandas_series,
-            # estimator_checks.check_sample_weights_list,
-            # estimator_checks.check_sample_weights_invariance,
-            estimator_checks.check_estimators_fit_returns_self,
-            estimator_checks.check_complex_data,
-            estimator_checks.check_estimators_empty_data_messages,
-            estimator_checks.check_pipeline_consistency,
-            estimator_checks.check_estimators_nan_inf,
-            estimator_checks.check_estimators_overwrite_params,
-            estimator_checks.check_estimator_sparse_data,
-            estimator_checks.check_estimators_pickle,
-        ]
-    ),
-)
-def test_estimator_checks(test_fn):
-    test_fn(IntervalEncoder.__name__, IntervalEncoder(n_chunks=2))
+@parametrize_with_checks([IntervalEncoder()])
+def test_sklearn_compatible_estimator(estimator, check):
+    check(estimator)
 
 
 @pytest.mark.parametrize("chunks", [1, 2, 5, 10])
@@ -50,6 +28,22 @@ def test_obvious_cases_two(random_xy_dataset_regr_small, method):
     x_transform = IntervalEncoder(method=method).fit(X, y).transform(X)
     assert x_transform.shape == X.shape
     assert np.all(np.isclose(x_transform, 1.0))
+
+
+def test_average_method_uses_a_bounded_window():
+    # With a linear target the averaged height at each interval should track the
+    # local y-value. The "average" window must be bounded on both sides; without
+    # a lower bound every point below the interval leaks in and biases the height
+    # down (regression test for the windowing predicate in _mk_average).
+    np.random.seed(0)
+    x = np.random.uniform(0, 10, 2000)
+    y = 2 * x
+    encoder = IntervalEncoder(n_chunks=5, span=0.1, method="average")
+    encoder.fit(x.reshape(-1, 1), y)
+    heights = encoder.heights_.ravel()
+    quantiles = encoder.quantiles_.ravel()
+    # skip the first quantile (near 0, where the relative error is ill-defined)
+    assert np.allclose(heights[1:], 2 * quantiles[1:], rtol=0.05)
 
 
 def generate_dataset(start, n=600):
@@ -73,7 +67,6 @@ def test_monotonicity_decreasing(data_init):
     X, y = generate_dataset(start=data_init)
     encoder = IntervalEncoder(n_chunks=40, method="decreasing")
     y_transformed = encoder.fit_transform(X, y).reshape(-1).round(4)
-    print(y_transformed.reshape(-1))
     for i in range(len(y_transformed) - 1):
         assert y_transformed[i] >= y_transformed[i + 1]
 

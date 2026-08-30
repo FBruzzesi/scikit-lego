@@ -1,37 +1,25 @@
-import pytest
 import numpy as np
 import pandas as pd
-
+import pytest
+from sklearn.utils.estimator_checks import parametrize_with_checks
 from sklearn.utils.validation import FLOAT_DTYPES
-from sklego.common import flatten
+
 from sklego.preprocessing import ColumnCapper
-from tests.conftest import select_tests, transformer_checks, general_checks, nonmeta_checks
 
 
-@pytest.mark.parametrize(
-    "test_fn",
-    select_tests(
-        flatten([general_checks, nonmeta_checks, transformer_checks]),
-        exclude=[
-            "check_sample_weights_invariance",
-            "check_estimators_nan_inf",
-            "check_sample_weights_list",
-            "check_sample_weights_pandas_series"
-        ]
-    )
-)
-def test_estimator_checks(test_fn):
-    test_fn(ColumnCapper.__name__, ColumnCapper())
+@parametrize_with_checks([ColumnCapper()])
+def test_sklearn_compatible_estimator(estimator, check):
+    check(estimator)
 
 
 def test_quantile_range():
     def expect_type_error(quantile_range):
         with pytest.raises(TypeError):
-            ColumnCapper(quantile_range)
+            ColumnCapper(quantile_range).fit([])
 
     def expect_value_error(quantile_range):
         with pytest.raises(ValueError):
-            ColumnCapper(quantile_range)
+            ColumnCapper(quantile_range).fit([])
 
     # Testing quantile_range type
     expect_type_error(quantile_range=1)
@@ -61,14 +49,12 @@ def test_interpolation():
 
     for interpolation in invalid_interpolations:
         with pytest.raises(ValueError):
-            ColumnCapper(interpolation=interpolation)
+            ColumnCapper(interpolation=interpolation).fit([])
 
 
 @pytest.fixture()
 def valid_df():
-    return pd.DataFrame(
-        {"a": [1, np.nan, 3, 4], "b": [11, 12, np.inf, 14], "c": [21, 22, 23, 24]}
-    )
+    return pd.DataFrame({"a": [1, np.nan, 3, 4], "b": [11, 12, np.inf, 14], "c": [21, 22, 23, 24]})
 
 
 def test_X_types_and_transformed_shapes(valid_df):
@@ -89,9 +75,7 @@ def test_X_types_and_transformed_shapes(valid_df):
 
     for invalid_df in invalid_dfs:
         expect_value_error(invalid_df)  # contains an invalid column ('a')
-        expect_value_error(
-            invalid_df["b"]
-        )  # 1d arrays should be reshaped before fitted/transformed
+        expect_value_error(invalid_df["b"])  # 1d arrays should be reshaped before fitted/transformed
         # Like this:
         ColumnCapper().fit_transform(invalid_df["b"].values.reshape(-1, 1))
         ColumnCapper().fit_transform(invalid_df["b"].values.reshape(1, -1))

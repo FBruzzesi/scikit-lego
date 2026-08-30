@@ -4,13 +4,13 @@ except ImportError:
     from sklego.notinstalled import NotInstalledPackage
 
     cp = NotInstalledPackage("cvxpy")
-
+import logging
 from abc import ABC, abstractmethod
+from inspect import signature
 from warnings import warn
 
+import narwhals.stable.v1 as nw
 import numpy as np
-import pandas as pd
-from deprecated.sphinx import deprecated
 from scipy.optimize import minimize
 from scipy.special._ufuncs import expit
 from sklearn.base import BaseEstimator, RegressorMixin
@@ -21,13 +21,13 @@ from sklearn.utils import check_X_y
 from sklearn.utils.validation import (
     FLOAT_DTYPES,
     _check_sample_weight,
-    check_array,
     check_is_fitted,
     column_or_1d,
 )
+from sklearn_compat.utils.validation import check_array, validate_data
 
 
-class LowessRegression(BaseEstimator, RegressorMixin):
+class LowessRegression(RegressorMixin, BaseEstimator):
     """`LowessRegression` estimator: LOWESS (Locally Weighted Scatterplot Smoothing) is a type of
     [local regression](https://en.wikipedia.org/wiki/Local_regression).
 
@@ -49,6 +49,25 @@ class LowessRegression(BaseEstimator, RegressorMixin):
         The training data.
     y_ : np.ndarray of shape (n_samples,)
         The target (training) values.
+
+
+    Examples
+    --------
+    ```python
+    from sklego.linear_model import LowessRegression
+    from sklearn.datasets import make_regression
+    from sklearn.model_selection import train_test_split
+
+    X, y = make_regression(n_samples=100, n_features=2, noise=10)
+
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2)
+
+    lowess = LowessRegression(sigma=1, span=0.5)
+    lowess.fit(X_train, y_train)
+
+    y_pred = lowess.predict(X_test)
+    print(y_pred)
+    ```
     """
 
     def __init__(self, sigma=1, span=None):
@@ -77,16 +96,15 @@ class LowessRegression(BaseEstimator, RegressorMixin):
             - If `span` is not between 0 and 1.
             - If `sigma` is negative.
         """
-        X, y = check_X_y(X, y, estimator=self, dtype=FLOAT_DTYPES)
+        X, y = validate_data(self, X=X, y=y, dtype=FLOAT_DTYPES, reset=True)
         if self.span is not None:
             if not 0 <= self.span <= 1:
-                raise ValueError(
-                    f"Param `span` must be 0 <= span <= 1, got: {self.span}"
-                )
+                raise ValueError(f"Param `span` must be 0 <= span <= 1, got: {self.span}")
         if self.sigma < 0:
             raise ValueError(f"Param `sigma` must be >= 0, got: {self.sigma}")
         self.X_ = X
         self.y_ = y
+        self.n_features_in_ = X.shape[1]
         return self
 
     def _calc_wts(self, x_i):
@@ -120,16 +138,24 @@ class LowessRegression(BaseEstimator, RegressorMixin):
         array-like of shape (n_samples,)
             The predicted values.
         """
-        X = check_array(X, estimator=self, dtype=FLOAT_DTYPES)
         check_is_fitted(self, ["X_", "y_"])
+        X = validate_data(self, X=X, dtype=FLOAT_DTYPES, reset=False)
 
-        results = np.stack(
-            [np.average(self.y_, weights=self._calc_wts(x_i=x_i)) for x_i in X]
-        )
+        try:
+            results = np.stack([np.average(self.y_, weights=self._calc_wts(x_i=x_i)) for x_i in X])
+        except ZeroDivisionError:
+            msg = (
+                "Weights, resulting from `np.exp(-(distances**2) / self.sigma)`, are all zero. "
+                "Try to increase the value of `sigma` or to normalize the input data.\n\n"
+                "`distances` refer to the distance between each sample `x_i` with all the"
+                "training samples."
+            )
+            raise ValueError(msg)
+
         return results
 
 
-class ProbWeightRegression(BaseEstimator, RegressorMixin):
+class ProbWeightRegression(RegressorMixin, BaseEstimator):
     """`ProbWeightRegression` assumes that all input signals in `X` need to be reweighted with weights that sum up to
     one in order to predict `y`.
 
@@ -149,6 +175,29 @@ class ProbWeightRegression(BaseEstimator, RegressorMixin):
         The learned coefficients after fitting the model.
     coefs_ : np.ndarray, shape (n_columns,)
         Deprecated, please use `coef_` instead.
+
+    Examples
+    --------
+    ```python
+    import numpy as np
+    from sklego.linear_model import ProbWeightRegression
+
+    X = np.array([[1, 2], [2, 3], [3, 4], [4, 5]])
+    y = np.array([1, 2, 3, 4])
+
+    pwr = ProbWeightRegression().fit(X, y)
+
+    # The weights sum up to 1
+    assert np.isclose(pwr.coef_.sum(), 1)
+
+    X_test = np.array([[5, 6], [6, 7]])
+
+    # The prediction is positive (all weights are positive, and features are positive)
+    assert all(pwr.predict(X_test) > 0)
+
+    # The weights are positive
+    assert all(pwr.coef_ > -1e-8)
+    ```
 
     !!! info
 
@@ -184,7 +233,7 @@ class ProbWeightRegression(BaseEstimator, RegressorMixin):
         self : ProbWeightRegression
             The fitted estimator.
         """
-        X, y = check_X_y(X, y, estimator=self, dtype=FLOAT_DTYPES)
+        X, y = validate_data(self, X=X, y=y, dtype=FLOAT_DTYPES, reset=True)
 
         # Construct the problem.
         betas = cp.Variable(X.shape[1])
@@ -196,6 +245,13 @@ class ProbWeightRegression(BaseEstimator, RegressorMixin):
         # Solve the problem.
         prob = cp.Problem(objective, constraints)
         prob.solve()
+
+        if prob.status != "optimal":
+            raise ValueError(
+                f"cvxpy could not find a solution (status: {prob.status}).\n"
+                "Consider feature scaling (e.g. StandardScaler) before fitting the model."
+            )
+
         self.coef_ = betas.value
         self.n_features_in_ = X.shape[1]
 
@@ -214,8 +270,8 @@ class ProbWeightRegression(BaseEstimator, RegressorMixin):
         array-like of shape (n_samples,)
             The predicted data.
         """
-        X = check_array(X, estimator=self, dtype=FLOAT_DTYPES)
         check_is_fitted(self, ["coef_"])
+        X = validate_data(self, X=X, dtype=FLOAT_DTYPES, reset=False)
         return np.dot(X, self.coef_)
 
     @property
@@ -227,7 +283,7 @@ class ProbWeightRegression(BaseEstimator, RegressorMixin):
         return self.coef_
 
 
-class DeadZoneRegressor(BaseEstimator, RegressorMixin):
+class DeadZoneRegressor(RegressorMixin, BaseEstimator):
     r"""The `DeadZoneRegressor` estimator implements a regression model that incorporates a _dead zone effect_ for
     improving the robustness of regression predictions.
 
@@ -242,8 +298,9 @@ class DeadZoneRegressor(BaseEstimator, RegressorMixin):
 
     $$\text{deadzone}(e) =
     \begin{cases}
-    e & \text{if } e > \text{threshold} \text{ and effect="linear"} \\
-    e^2 & \text{if } e > \text{threshold} \text{ and effect="quadratic"} \\
+    1 & \text{if } e > \text{threshold} \text{ & effect="constant"} \\
+    e & \text{if } e > \text{threshold} \text{ & effect="linear"} \\
+    e^2 & \text{if } e > \text{threshold} \text{ & effect="quadratic"} \\
     0 & \text{otherwise}
     \end{cases}
     $$
@@ -262,7 +319,8 @@ class DeadZoneRegressor(BaseEstimator, RegressorMixin):
             outside the threshold are penalized linearly.
         - "quadratic": the errors within the threshold have no impact (their contribution is effectively zero), and
             errors outside the threshold are penalized quadratically (squared).
-        - "constant": the errors within the threshold have no impact, and errors outside the threshold are penalized with a constant value.
+        - "constant": the errors within the threshold have no impact, and errors outside the threshold are penalized
+            with a constant value.
     n_iter : int, default=2000
         The number of iterations to run the gradient descent algorithm.
     stepsize : float, default=0.01
@@ -276,6 +334,24 @@ class DeadZoneRegressor(BaseEstimator, RegressorMixin):
         The learned coefficients after fitting the model.
     coefs_ : np.ndarray, shape (n_columns,)
         Deprecated, please use `coef_` instead.
+
+    Examples
+    --------
+
+    ```python
+    import numpy as np
+    from sklego.linear_model import DeadZoneRegressor
+
+    X = np.array([[1, 2], [2, 3], [3, 4], [4, 5]])
+    y = np.array([1, 2, 3, 4])
+
+    dzr = DeadZoneRegressor(threshold=0.5, relative=False, effect="quadratic").fit(X, y)
+
+    X_test = np.array([[5, 6], [6, 7]])
+    y_pred = dzr.predict(X_test)
+
+    print(y_pred)
+    ```
     """
 
     _ALLOWED_EFFECTS = ("linear", "quadratic", "constant")
@@ -310,7 +386,8 @@ class DeadZoneRegressor(BaseEstimator, RegressorMixin):
         ValueError
             If `effect` is not one of "linear", "quadratic" or "constant".
         """
-        X, y = check_X_y(X, y, estimator=self, dtype=FLOAT_DTYPES)
+        X, y = validate_data(self, X=X, y=y, dtype=FLOAT_DTYPES, reset=True)
+
         if self.effect not in self._ALLOWED_EFFECTS:
             raise ValueError(f"effect {self.effect} must be in {self._ALLOWED_EFFECTS}")
 
@@ -387,8 +464,9 @@ class DeadZoneRegressor(BaseEstimator, RegressorMixin):
         array-like of shape (n_samples,)
             The predicted data.
         """
-        X = check_array(X, estimator=self, dtype=FLOAT_DTYPES)
         check_is_fitted(self, ["coef_"])
+        X = validate_data(self, X=X, dtype=FLOAT_DTYPES, reset=False)
+
         return np.dot(X, self.coef_)
 
     @property
@@ -409,7 +487,7 @@ class DeadZoneRegressor(BaseEstimator, RegressorMixin):
         return self._ALLOWED_EFFECTS
 
 
-class _FairClassifier(BaseEstimator, LinearClassifierMixin):
+class _FairClassifier(LinearClassifierMixin, BaseEstimator):
     """Base class for fair classifiers that address sensitive attribute fairness.
 
     This base class provides a foundation for fair classifiers that aim to mitigate bias and discrimination by taking
@@ -427,8 +505,9 @@ class _FairClassifier(BaseEstimator, LinearClassifierMixin):
         A list of column names or column indexes in the input data that represent sensitive attributes.
     C : float, default=1.0
         Inverse of regularization strength; must be a positive float. Smaller values specify stronger regularization.
-    penalty : Literal["l1", "none"], default="l1"
-        The type of penalty to apply to the model. "l1" applies L1 regularization, while "none" disables regularization.
+    penalty : Literal["l1", "l2", "none", None], default="l1"
+        The type of penalty to apply to the model. "l1" applies L1 regularization, "l2" applies L2 regularization,
+        while None (or "none") disables regularization.
     fit_intercept : bool, default=True
         Whether or not to fit an intercept term. If True, an intercept term is added to the model.
     max_iter : int, default=100
@@ -451,6 +530,8 @@ class _FairClassifier(BaseEstimator, LinearClassifierMixin):
 
     `_FairClassifier` should not be used directly; it serves as a base class for fair classification models.
     """
+
+    _ALLOWED_PENALTIES = ("l1", "l2", "none", None)
 
     def __init__(
         self,
@@ -488,26 +569,38 @@ class _FairClassifier(BaseEstimator, LinearClassifierMixin):
         Raises
         ------
         ValueError
-            If `penalty` is not one of "l1" or "none".
+            If `penalty` is not one of "l1", "l2", "none" or None.
         """
-        if self.penalty not in ["l1", "none"]:
-            raise ValueError(
-                f"penalty should be either 'l1' or 'none', got {self.penalty}"
+        if self.penalty not in self._ALLOWED_PENALTIES:
+            raise ValueError(f"penalty should be one of {self._ALLOWED_PENALTIES}, got {self.penalty}")
+
+        if self.penalty == "none":
+            warn(
+                "Please use `penalty=None` instead of `penalty='none'`, 'none' will be deprecated in future versions",
+                DeprecationWarning,
             )
 
         self.sensitive_col_idx_ = self.sensitive_cols
-        if isinstance(X, pd.DataFrame):
-            self.sensitive_col_idx_ = [
-                i for i, name in enumerate(X.columns) if name in self.sensitive_cols
-            ]
-        X, y = check_X_y(X, y, accept_large_sparse=False)
+        X = nw.from_native(X, eager_only=True, strict=False)
 
+        if isinstance(X, nw.DataFrame):
+            self.sensitive_col_idx_ = [i for i, name in enumerate(X.columns) if name in self.sensitive_cols]
+
+        X, y = check_X_y(X, y, accept_large_sparse=False)
         sensitive = X[:, self.sensitive_col_idx_]
+
         if not self.train_sensitive_cols:
             X = np.delete(X, self.sensitive_col_idx_, axis=1)
-        X = self._add_intercept(X)
+
+        if self.fit_intercept:
+            X = np.c_[np.ones(len(X)), X]
+
+        if X.shape[1] == 0:
+            msg = "Cannot fit the model, at least 1 feature(s) is required."
+            raise ValueError(msg)
 
         column_or_1d(y)
+
         label_encoder = LabelEncoder().fit(y)
         y = label_encoder.transform(y)
         self.classes_ = label_encoder.classes_
@@ -522,9 +615,7 @@ class _FairClassifier(BaseEstimator, LinearClassifierMixin):
         return self
 
     def constraints(self, y_hat, y_true, sensitive, n_obs):
-        raise NotImplementedError(
-            "subclasses of `_FairClassifier` should implement constraints"
-        )
+        raise NotImplementedError("subclasses of `_FairClassifier` should implement constraints")
 
     def _solve(self, sensitive, X, y):
         """Solve the optimization problem for the fair classifier."""
@@ -534,22 +625,32 @@ class _FairClassifier(BaseEstimator, LinearClassifierMixin):
 
         log_likelihood = cp.sum(
             cp.multiply(y, y_hat)
-            - cp.log_sum_exp(
-                cp.hstack([np.zeros((n_obs, 1)), cp.reshape(y_hat, (n_obs, 1))]), axis=1
-            )
+            - cp.log_sum_exp(cp.hstack([np.zeros((n_obs, 1)), cp.reshape(y_hat, (n_obs, 1))]), axis=1)
         )
+
         if self.penalty == "l1":
-            log_likelihood -= cp.sum((1 / self.C) * cp.norm(theta[1:]))
+            log_likelihood -= cp.norm(theta[int(self.fit_intercept) :], 1) / self.C
+
+        elif self.penalty == "l2":
+            log_likelihood -= cp.norm(theta[int(self.fit_intercept) :], 2) / self.C
 
         constraints = self.constraints(y_hat, y, sensitive, n_obs)
 
         problem = cp.Problem(cp.Maximize(log_likelihood), constraints)
-        problem.solve(max_iters=self.max_iter)
+
+        if "max_iters" in signature(problem.solve).parameters:
+            kwargs = {"max_iters": self.max_iter}
+        else:
+            if self.max_iter:
+                logging.warning("solver does not support `max_iters` and the argument will be ignored")
+            kwargs = {}
+
+        problem.solve(**kwargs)
 
         if problem.status in ["infeasible", "unbounded"]:
             raise ValueError(f"problem was found to be {problem.status}")
 
-        self.n_iter_ = problem.solver_stats.num_iters
+        self.n_iter_ = getattr(problem.solver_stats, "num_iters", 0)
 
         if self.fit_intercept:
             self.coef_ = theta.value[np.newaxis, 1:]
@@ -584,12 +685,11 @@ class _FairClassifier(BaseEstimator, LinearClassifierMixin):
             X = np.delete(X, self.sensitive_col_idx_, axis=1)
         return super().decision_function(X)
 
-    def _add_intercept(self, X):
-        if self.fit_intercept:
-            return np.c_[np.ones(len(X)), X]
+    def _more_tags(self):
+        return {"poor_score": True}
 
 
-class DemographicParityClassifier(BaseEstimator, LinearClassifierMixin):
+class DemographicParityClassifier(LinearClassifierMixin, BaseEstimator):
     r"""`DemographicParityClassifier` is a logistic regression classifier which can be constrained on demographic
     parity (p% score).
 
@@ -597,14 +697,34 @@ class DemographicParityClassifier(BaseEstimator, LinearClassifierMixin):
     distance to the decision boundary of the classifier.
 
     !!! warning
+        We suggest to use
+        [fairlearn `ThresholdOptimizer`](https://fairlearn.org/v0.13/api_reference/generated/fairlearn.postprocessing.ThresholdOptimizer.html)
+        with `constraints='demographic_parity'` in combination with scikit-learn `LogisticRegression` instead of
+        scikit-lego `DemographicParityClassifier` implementation:
+
+        ```py
+        from fairlearn.postprocessing import ThresholdOptimizer
+        from sklearn.linear_model import LogisticRegression
+
+        unmitigated_lr = LogisticRegression().fit(X, y)
+        postprocess_est = ThresholdOptimizer(
+            estimator=unmitigated_lr,
+            constraints='demographic_parity',
+            objective='balanced_accuracy_score',
+            prefit=True,
+            predict_method='predict_proba'
+        )
+        postprocess_est.fit(X, y, sensitive_features=sensitive_features)
+        ```
+
+    !!! note
         This classifier only works for binary classification problems.
 
-    $$\begin{array}{cl}{\operatorname{minimize}} & -\sum_{i=1}^{N} \log p\left(y_{i} | \mathbf{x}_{i},
-        \boldsymbol{\theta}\right) \\
-        {\text { subject to }} & {\frac{1}{N} \sum_{i=1}^{N}\left(\mathbf{z}_{i}-\overline{\mathbf{z}}\right)
-        d_\boldsymbol{\theta}\left(\mathbf{x}_{i}\right) \leq \mathbf{c}} \\
-        {} & {\frac{1}{N} \sum_{i=1}^{N}\left(\mathbf{z}_{i}-\overline{\mathbf{z}}\right)
-        d_{\boldsymbol{\theta}}\left(\mathbf{x}_{i}\right) \geq-\mathbf{c}}\end{array}$$
+    $$
+    \begin{array}{cl}{\operatorname{minimize}} & -\sum_{i=1}^{N} \log p\left(y_{i} | \mathbf{x}_{i}, \boldsymbol{\theta}\right) \\
+    {\text { subject to }} & {\frac{1}{N} \sum_{i=1}^{N}\left(\mathbf{z}_{i}-\overline{\mathbf{z}}\right) d_\boldsymbol{\theta}\left(\mathbf{x}_{i}\right) \leq \mathbf{c}} \\
+    {} & {\frac{1}{N} \sum_{i=1}^{N}\left(\mathbf{z}_{i}-\overline{\mathbf{z}}\right) d_{\boldsymbol{\theta}}\left(\mathbf{x}_{i}\right) \geq-\mathbf{c}}\end{array}
+    $$
 
     Parameters
     ----------
@@ -616,8 +736,9 @@ class DemographicParityClassifier(BaseEstimator, LinearClassifierMixin):
     C : float, default=1.0
         Inverse of regularization strength; must be a positive float. Like in support vector machines, smaller values
         specify stronger regularization.
-    penalty : Literal["l1", "none"], default="l1"
-        Used to specify the norm used in the penalization.
+    penalty : Literal["l1", "l2", "none", None], default="l1"
+        The type of penalty to apply to the model. "l1" applies L1 regularization, "l2" applies L2 regularization,
+        while None (or "none") disables regularization.
     fit_intercept : bool, default=True
         Whether or not a constant term (a.k.a. bias or intercept) should be added to the decision function.
     max_iter : int, default=100
@@ -632,28 +753,42 @@ class DemographicParityClassifier(BaseEstimator, LinearClassifierMixin):
     Source
     ------
     M. Zafar et al. (2017), Fairness Constraints: Mechanisms for Fair Classification
+
+
+    Examples
+    --------
+    ```python
+    from sklego.linear_model import DemographicParityClassifier
+    from sklearn.datasets import make_classification
+    from sklearn.model_selection import train_test_split
+
+    X, y = make_classification(
+        n_samples=100,
+        n_features=2,
+        n_informative=2,
+        n_redundant=0,
+        n_clusters_per_class=1,
+    )
+
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2)
+
+    dp = DemographicParityClassifier(
+        covariance_threshold=0.1, sensitive_cols=[0]
+    ).fit(X_train, y_train)
+
+    y_pred = dp.predict_proba(X_test)
+
+    print(y_pred)
+    ```
     """
 
     def __new__(cls, *args, multi_class="ovr", n_jobs=1, **kwargs):
-        multiclass_meta = {"ovr": OneVsRestClassifier, "ovo": OneVsOneClassifier}[
-            multi_class
-        ]
-        return multiclass_meta(
-            _DemographicParityClassifier(*args, **kwargs), n_jobs=n_jobs
-        )
-
-
-@deprecated(
-    version="0.4.0",
-    reason="Please use `sklego.linear_model.DemographicParityClassifier instead`",
-)
-class FairClassifier(DemographicParityClassifier):
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
+        multiclass_meta = {"ovr": OneVsRestClassifier, "ovo": OneVsOneClassifier}[multi_class]
+        return multiclass_meta(_DemographicParityClassifier(*args, **kwargs), n_jobs=n_jobs)
 
 
 class _DemographicParityClassifier(_FairClassifier):
-    r"""Classifier for Demographic Parity fairness constraint.
+    """Classifier for Demographic Parity fairness constraint.
 
     This classifier extends the `_FairClassifier` and adds a Demographic Parity fairness constraint.
     Demographic Parity ensures that the probability of a positive outcome is the same for all groups defined by
@@ -672,6 +807,12 @@ class _DemographicParityClassifier(_FairClassifier):
         max_iter=100,
         train_sensitive_cols=False,
     ):
+        msg = (
+            "Please consider using fairlearn `ThresholdOptimizer` with `constraints='demographic_parity'` in "
+            "combination with scikit-learn `LogisticRegression` instead.\n\n"
+            "Docs: https://fairlearn.org/v0.13/api_reference/generated/fairlearn.postprocessing.ThresholdOptimizer.html"
+        )
+        warn(msg, UserWarning)
         super().__init__(
             sensitive_cols=sensitive_cols,
             C=C,
@@ -692,7 +833,7 @@ class _DemographicParityClassifier(_FairClassifier):
             return []
 
 
-class EqualOpportunityClassifier(BaseEstimator, LinearClassifierMixin):
+class EqualOpportunityClassifier(LinearClassifierMixin, BaseEstimator):
     r"""`EqualOpportunityClassifier` is a logistic regression classifier which can be constrained on equal opportunity
     score.
 
@@ -700,14 +841,34 @@ class EqualOpportunityClassifier(BaseEstimator, LinearClassifierMixin):
     distance to the decision boundary of the classifier for those examples that have a y_true of 1.
 
     !!! warning
+        We suggest to use
+        [fairlearn `ThresholdOptimizer`](https://fairlearn.org/v0.13/api_reference/generated/fairlearn.postprocessing.ThresholdOptimizer.html)
+        with `constraints='true_positive_rate_parity'` in combination with scikit-learn `LogisticRegression` instead of
+        scikit-lego `EqualOpportunityClassifier` implementation:
+
+        ```py
+        from fairlearn.postprocessing import ThresholdOptimizer
+        from sklearn.linear_model import LogisticRegression
+
+        unmitigated_lr = LogisticRegression().fit(X, y)
+        postprocess_est = ThresholdOptimizer(
+            estimator=unmitigated_lr,
+            constraints='true_positive_rate_parity',  # closest equivalent
+            objective='balanced_accuracy_score',
+            prefit=True,
+            predict_method='predict_proba'
+        )
+        postprocess_est.fit(X, y, sensitive_features=sensitive_features)
+        ```
+
+    !!! note
         This classifier only works for binary classification problems.
 
-    $$\begin{array}{cl}{\operatorname{minimize}} & -\sum_{i=1}^{N} \log p\left(y_{i} | \mathbf{x}_{i},
-        \boldsymbol{\theta}\right) \\
-        {\text { subject to }} & {\frac{1}{POS} \sum_{i=1}^{POS}\left(\mathbf{z}_{i}-\overline{\mathbf{z}}\right)
-        d_\boldsymbol{\theta}\left(\mathbf{x}_{i}\right) \leq \mathbf{c}} \\
-        {} & {\frac{1}{POS} \sum_{i=1}^{POS}\left(\mathbf{z}_{i}-\overline{\mathbf{z}}\right)
-        d_{\boldsymbol{\theta}}\left(\mathbf{x}_{i}\right) \geq-\mathbf{c}}\end{array}$$
+    $$
+    \begin{array}{cl}{\operatorname{minimize}} & -\sum_{i=1}^{N} \log p\left(y_{i} | \mathbf{x}_{i}, \boldsymbol{\theta}\right) \\
+    {\text { subject to }} & {\frac{1}{POS} \sum_{i=1}^{POS}\left(\mathbf{z}_{i}-\overline{\mathbf{z}}\right) d_\boldsymbol{\theta}\left(\mathbf{x}_{i}\right) \leq \mathbf{c}} \\
+    {} & {\frac{1}{POS} \sum_{i=1}^{POS}\left(\mathbf{z}_{i}-\overline{\mathbf{z}}\right) d_{\boldsymbol{\theta}}\left(\mathbf{x}_{i}\right) \geq-\mathbf{c}}\end{array}
+    $$
 
     where POS is the subset of the population where $\text{y_true} = 1$
 
@@ -723,8 +884,9 @@ class EqualOpportunityClassifier(BaseEstimator, LinearClassifierMixin):
     C : float, default=1.0
         Inverse of regularization strength; must be a positive float. Like in support vector machines, smaller values
         specify stronger regularization.
-    penalty : Literal["l1", "none"], default="l1"
-        Used to specify the norm used in the penalization.
+    penalty : Literal["l1", "l2", "none", None], default="l1"
+        The type of penalty to apply to the model. "l1" applies L1 regularization, "l2" applies L2 regularization,
+        while None (or "none") disables regularization.
     fit_intercept : bool, default=True
         Whether or not a constant term (a.k.a. bias or intercept) should be added to the decision function.
     max_iter : int, default=100
@@ -735,15 +897,38 @@ class EqualOpportunityClassifier(BaseEstimator, LinearClassifierMixin):
         The method to use for multiclass predictions.
     n_jobs : int | None, default=1
         The amount of parallel jobs that should be used to fit the model.
+
+    Examples
+    --------
+
+    ```python
+    from sklego.linear_model import EqualOpportunityClassifier
+    from sklearn.datasets import make_classification
+    from sklearn.model_selection import train_test_split
+
+    X, y = make_classification(
+        n_samples=100,
+        n_features=2,
+        n_informative=2,
+        n_redundant=0,
+        n_clusters_per_class=1,
+    )
+
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2)
+
+    eo = EqualOpportunityClassifier(
+        covariance_threshold=0.1, positive_target=1, sensitive_cols=[0]
+    ).fit(X_train, y_train)
+
+    y_pred = eo.predict_proba(X_test)
+
+    print(y_pred)
+    ```
     """
 
     def __new__(cls, *args, multi_class="ovr", n_jobs=1, **kwargs):
-        multiclass_meta = {"ovr": OneVsRestClassifier, "ovo": OneVsOneClassifier}[
-            multi_class
-        ]
-        return multiclass_meta(
-            _EqualOpportunityClassifier(*args, **kwargs), n_jobs=n_jobs
-        )
+        multiclass_meta = {"ovr": OneVsRestClassifier, "ovo": OneVsOneClassifier}[multi_class]
+        return multiclass_meta(_EqualOpportunityClassifier(*args, **kwargs), n_jobs=n_jobs)
 
 
 class _EqualOpportunityClassifier(_FairClassifier):
@@ -758,6 +943,13 @@ class _EqualOpportunityClassifier(_FairClassifier):
         max_iter=100,
         train_sensitive_cols=False,
     ):
+        msg = (
+            "Please consider using fairlearn `ThresholdOptimizer` with `constraints='true_positive_rate_parity'` in"
+            "combination "
+            "with scikit-learn `LogisticRegression` instead.\n\n"
+            "Docs: https://fairlearn.org/v0.13/api_reference/generated/fairlearn.postprocessing.ThresholdOptimizer.html"
+        )
+        warn(msg, UserWarning)
         super().__init__(
             sensitive_cols=sensitive_cols,
             C=C,
@@ -774,10 +966,7 @@ class _EqualOpportunityClassifier(_FairClassifier):
             n_obs = len(y_true[y_true == self.positive_target])
             dec_boundary_cov = (
                 y_hat[y_true == self.positive_target]
-                @ (
-                    sensitive[y_true == self.positive_target]
-                    - np.mean(sensitive, axis=0)
-                )
+                @ (sensitive[y_true == self.positive_target] - np.mean(sensitive, axis=0))
                 / n_obs
             )
             return [cp.abs(dec_boundary_cov) <= self.covariance_threshold]
@@ -785,7 +974,7 @@ class _EqualOpportunityClassifier(_FairClassifier):
             return []
 
 
-class BaseScipyMinimizeRegressor(BaseEstimator, RegressorMixin, ABC):
+class BaseScipyMinimizeRegressor(RegressorMixin, BaseEstimator, ABC):
     """Abstract base class for regressors relying on Scipy's
     [minimize method](https://docs.scipy.org/doc/scipy/reference/generated/scipy.optimize.minimize.html) to minimize a
     (custom) loss function.
@@ -841,11 +1030,6 @@ class BaseScipyMinimizeRegressor(BaseEstimator, RegressorMixin, ABC):
         self.fit_intercept = fit_intercept
         self.copy_X = copy_X
         self.positive = positive
-        if method not in ("SLSQP", "TNC", "L-BFGS-B"):
-            raise ValueError(
-                f'method should be one of "SLSQP", "TNC", "L-BFGS-B", '
-                f"got {method} instead"
-            )
         self.method = method
 
     @abstractmethod
@@ -871,15 +1055,12 @@ class BaseScipyMinimizeRegressor(BaseEstimator, RegressorMixin, ABC):
         ...
 
     def _regularized_loss(self, params):
-        return +self.alpha * self.l1_ratio * np.sum(
-            np.abs(params)
-        ) + 0.5 * self.alpha * (1 - self.l1_ratio) * np.sum(params**2)
+        return +self.alpha * self.l1_ratio * np.sum(np.abs(params)) + 0.5 * self.alpha * (1 - self.l1_ratio) * np.sum(
+            params**2
+        )
 
     def _regularized_grad_loss(self, params):
-        return (
-            +self.alpha * self.l1_ratio * np.sign(params)
-            + self.alpha * (1 - self.l1_ratio) * params
-        )
+        return +self.alpha * self.l1_ratio * np.sign(params) + self.alpha * (1 - self.l1_ratio) * params
 
     def fit(self, X, y, sample_weight=None):
         """Fit the linear model on training data `X` and `y` by optimizing the loss function using gradient descent.
@@ -898,14 +1079,14 @@ class BaseScipyMinimizeRegressor(BaseEstimator, RegressorMixin, ABC):
         self : BaseScipyMinimizeRegressor
             Fitted linear model.
         """
+        if self.method not in {"SLSQP", "TNC", "L-BFGS-B"}:
+            msg = f"method should be one of 'SLSQP', 'TNC', 'L-BFGS-B', got {self.method} instead"
+            raise ValueError(msg)
+
         X_, grad_loss, loss = self._prepare_inputs(X, sample_weight, y)
 
         d = X_.shape[1] - self.n_features_in_  # This is either zero or one.
-        bounds = (
-            self.n_features_in_ * [(0, np.inf)] + d * [(-np.inf, np.inf)]
-            if self.positive
-            else None
-        )
+        bounds = self.n_features_in_ * [(0, np.inf)] + d * [(-np.inf, np.inf)] if self.positive else None
         minimize_result = minimize(
             loss,
             x0=np.zeros(self.n_features_in_ + d),
@@ -932,7 +1113,8 @@ class BaseScipyMinimizeRegressor(BaseEstimator, RegressorMixin, ABC):
         This method is called by `fit` to prepare the inputs for the optimization problem. It adds an intercept column
         to `X` if `fit_intercept=True`, and returns the loss function and its gradient.
         """
-        X, y = check_X_y(X, y, y_numeric=True)
+        X, y = validate_data(self, X=X, y=y, y_numeric=True, reset=True)
+
         sample_weight = _check_sample_weight(sample_weight, X)
         self.n_features_in_ = X.shape[1]
 
@@ -962,7 +1144,7 @@ class BaseScipyMinimizeRegressor(BaseEstimator, RegressorMixin, ABC):
             The predicted data.
         """
         check_is_fitted(self)
-        X = check_array(X)
+        X = validate_data(self, X=X, reset=False)
 
         return X @ self.coef_ + self.intercept_
 
@@ -1058,21 +1240,16 @@ class ImbalancedLinearRegression(BaseScipyMinimizeRegressor):
 
     def _get_objective(self, X, y, sample_weight):
         def imbalanced_loss(params):
-            return 0.5 * np.mean(
-                sample_weight
-                * np.where(X @ params > y, self.overestimation_punishment_factor, 1)
-                * np.square(y - X @ params)
+            return 0.5 * np.average(
+                np.where(X @ params > y, self.overestimation_punishment_factor, 1) * np.square(y - X @ params),
+                weights=sample_weight,
             ) + self._regularized_loss(params)
 
         def grad_imbalanced_loss(params):
             return (
-                -(
-                    sample_weight
-                    * np.where(X @ params > y, self.overestimation_punishment_factor, 1)
-                    * (y - X @ params)
-                )
+                -(sample_weight * np.where(X @ params > y, self.overestimation_punishment_factor, 1) * (y - X @ params))
                 @ X
-                / X.shape[0]
+                / sample_weight.sum()
             ) + self._regularized_grad_loss(params)
 
         return imbalanced_loss, grad_imbalanced_loss
@@ -1098,9 +1275,22 @@ class QuantileRegression(BaseScipyMinimizeRegressor):
 
     Compared to linear regression, this approach is robust to outliers.
 
-    !!! info
-        This implementation uses
-        [scipy.optimize.minimize](https://docs.scipy.org/doc/scipy/reference/generated/scipy.optimize.minimize.html).
+    !!! warning
+        We suggest to use the
+        [official scikit-learn version of quantile regression](https://scikit-learn.org/stable/modules/generated/sklearn.linear_model.QuantileRegressor.html)
+        instead of the scikit-lego implementation:
+
+        ```py
+        from sklearn.linear_model import QuantileRegressor
+        ```
+
+        There are a few reasons for this:
+
+        - This implementation uses [scipy.optimize.minimize](https://docs.scipy.org/doc/scipy/reference/generated/scipy.optimize.minimize.html)
+            on a non-smooth function which is not ideal for a few solvers.
+        - If, while fitting the model, `sample_weight` contains any zero values, some solvers may not converge properly.
+            We would expect that a sample weight of zero is equivalent to removing the sample, however unittests tell us
+            that this is always the case only for `method='SLSQP'` (our default).
 
     Parameters
     ----------
@@ -1168,26 +1358,27 @@ class QuantileRegression(BaseScipyMinimizeRegressor):
         method="SLSQP",
         quantile=0.5,
     ):
+        msg = (
+            "Please consider using scikit-learn version of quantile regression.\n\n"
+            "Hint: `from sklearn.linear_model import QuantileRegressor`\n"
+            "Docs: https://scikit-learn.org/stable/modules/generated/sklearn.linear_model.QuantileRegressor.html"
+        )
+        warn(msg, UserWarning)
         super().__init__(alpha, l1_ratio, fit_intercept, copy_X, positive, method)
         self.quantile = quantile
 
     def _get_objective(self, X, y, sample_weight):
         def quantile_loss(params):
-            return np.mean(
-                sample_weight
-                * np.where(X @ params < y, self.quantile, 1 - self.quantile)
-                * np.abs(y - X @ params)
+            return np.average(
+                np.where(X @ params < y, self.quantile, 1 - self.quantile) * np.abs(y - X @ params),
+                weights=sample_weight,
             ) + self._regularized_loss(params)
 
         def grad_quantile_loss(params):
             return (
-                -(
-                    sample_weight
-                    * np.where(X @ params < y, self.quantile, 1 - self.quantile)
-                    * np.sign(y - X @ params)
-                )
+                -(sample_weight * np.where(X @ params < y, self.quantile, 1 - self.quantile) * np.sign(y - X @ params))
                 @ X
-                / X.shape[0]
+                / sample_weight.sum()
             ) + self._regularized_grad_loss(params)
 
         return quantile_loss, grad_quantile_loss
@@ -1233,9 +1424,25 @@ class LADRegression(QuantileRegression):
     Compared to linear regression, this approach is robust to outliers. You can even optimize for the lowest MAPE
     (Mean Average Percentage Error), by providing `sample_weight=np.abs(1/y_train)` when fitting the regressor.
 
-    !!! info
-        This implementation uses
-        [scipy.optimize.minimize](https://docs.scipy.org/doc/scipy/reference/generated/scipy.optimize.minimize.html).
+    !!! warning
+        We suggest to use the
+        [official scikit-learn version of quantile regression](https://scikit-learn.org/stable/modules/generated/sklearn.linear_model.QuantileRegressor.html)
+        with `quantile=0.5` instead of the scikit-lego implementation:
+
+        ```py
+        from sklearn.linear_model import QuantileRegressor
+
+        lad_reg = QuantileRegressor(..., quantile=0.5)
+        ```
+
+        There are a few reasons for this:
+
+        - You can expect better support and more stability from the scikit-learn team.
+        - This implementation uses [scipy.optimize.minimize](https://docs.scipy.org/doc/scipy/reference/generated/scipy.optimize.minimize.html)
+            on a non-smooth function which is not ideal for a few solvers.
+        - If, while fitting the model, `sample_weight` contains any zero values, some solvers may not converge properly.
+            We would expect that a sample weight of zero is equivalent to removing the sample, however unittests tell us
+            that this is always the case only for `method='SLSQP'` (our default).
 
     Parameters
     ----------
@@ -1302,6 +1509,4 @@ class LADRegression(QuantileRegression):
         positive=False,
         method="SLSQP",
     ):
-        super().__init__(
-            alpha, l1_ratio, fit_intercept, copy_X, positive, method, quantile=0.5
-        )
+        super().__init__(alpha, l1_ratio, fit_intercept, copy_X, positive, method, quantile=0.5)

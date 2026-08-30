@@ -1,39 +1,39 @@
-import pytest
 import numpy as np
-from sklearn.ensemble import IsolationForest
+import pytest
 from sklearn.cluster import KMeans
+from sklearn.ensemble import IsolationForest
 from sklearn.pipeline import Pipeline
-from sklearn.utils import estimator_checks
+from sklearn_compat.utils.estimator_checks import parametrize_with_checks
 
-from sklego.common import flatten
-from sklego.preprocessing import OutlierRemover
 from sklego.mixture import GMMOutlierDetector
+from sklego.preprocessing import OutlierRemover
+from tests.conftest import GAUSSIAN_MIXTURE_ARRAY_API_REASON, expect_array_api_failure
 
 
-@pytest.mark.parametrize(
-    "test_fn",
-    flatten(
-        [
-            estimator_checks.check_transformers_unfitted,
-            estimator_checks.check_fit2d_predict1d,
-            estimator_checks.check_fit2d_1sample,
-            estimator_checks.check_fit2d_1feature,
-            estimator_checks.check_fit1d,
-            estimator_checks.check_get_params_invariance,
-            estimator_checks.check_set_params,
-            estimator_checks.check_dont_overwrite_parameters,
-            estimator_checks.check_transformers_unfitted,
-        ]
-    ),
+def _expected_failed_checks(estimator: OutlierRemover) -> dict[str, str]:
+    """Only the wrapped detector decides whether `array_api_dispatch` breaks, so apply the rule to it."""
+    expect_failure = expect_array_api_failure(GAUSSIAN_MIXTURE_ARRAY_API_REASON, applies_to=(GMMOutlierDetector,))
+    return expect_failure(estimator.outlier_detector)
+
+
+@parametrize_with_checks(
+    [
+        OutlierRemover(outlier_detector=GMMOutlierDetector(), refit=True),
+        OutlierRemover(outlier_detector=IsolationForest(), refit=True),
+    ],
+    expected_failed_checks=_expected_failed_checks,
 )
-def test_estimator_checks(test_fn):
-    gmm_remover = OutlierRemover(outlier_detector=GMMOutlierDetector(), refit=True)
-    test_fn(OutlierRemover.__name__, gmm_remover)
-
-    isolation_forest_remover = OutlierRemover(
-        outlier_detector=IsolationForest(), refit=True
-    )
-    test_fn(OutlierRemover.__name__, isolation_forest_remover)
+def test_sklearn_compatible_estimator(estimator, check):
+    if check.func.__name__ in {
+        # As this transformer removes samples, it is not standard for sure
+        "check_transformer_general",
+        "check_methods_sample_order_invariance",  # leads to out of index
+        "check_methods_subset_invariance",  # leads to different shapes
+        "check_transformer_data_not_an_array",  # hash only supports a few types
+        "check_pipeline_consistency",  # Discussed in https://github.com/koaning/scikit-lego/issues/643
+    }:
+        pytest.skip("OutlierRemover is a TrainOnlyTransformer")
+    check(estimator)
 
 
 def test_no_outliers(mocker):
@@ -64,9 +64,7 @@ def test_do_not_refit(mocker):
     mock_outlier_detector.predict.return_value = np.array([-1])
     mocker.patch("sklego.preprocessing.outlier_remover.clone").return_value = mock_outlier_detector
 
-    outlier_remover = OutlierRemover(
-        outlier_detector=mock_outlier_detector, refit=False
-    )
+    outlier_remover = OutlierRemover(outlier_detector=mock_outlier_detector, refit=False)
     outlier_remover.fit(X=np.array([[5, 5]]))
     mock_outlier_detector.fit.assert_not_called()
 

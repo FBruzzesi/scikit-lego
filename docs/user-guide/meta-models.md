@@ -18,7 +18,7 @@ We demonstrate how that works below. First we'll import the necessary libraries 
 --8<-- "docs/_scripts/meta-models.py:skewed-data"
 ```
 
-![skewed-data](/_static/meta-models/skewed-data.png)
+![skewed-data](../_static/meta-models/skewed-data.png)
 
 Next we'll make a cross validation pipeline to try out this thresholder.
 
@@ -37,7 +37,7 @@ With this cross validation trained, we'll make a chart to show the effect of cha
 --8<-- "docs/_scripts/meta-models.py:threshold-chart"
 ```
 
-![skewed-data](/_static/meta-models/threshold-chart.png)
+![skewed-data](../_static/meta-models/threshold-chart.png)
 
 Increasing the threshold will increase the precision but as expected this is at the cost of recall (and accuracy).
 
@@ -58,14 +58,13 @@ Wall time: 917 ms
 
 ## Grouped Prediction
 
-<p align="center">
-  <img src="/_static/meta-models/grouped-model.png" />
-</p>
+![grouped-model](../_static/meta-models/grouped-model.png)
 
 To help explain what it can do we'll consider three methods to predict the chicken weight.
 
 The chicken data has 578 rows and 4 columns from an experiment on the effect of diet on early growth of chicks.
-The body weights of the chicks were measured at birth and every second day thereafter until day 20. They were also measured on day 21.
+The body weights of the chicks were measured at birth and every second day thereafter until day 20.
+They were also measured on day 21.
 There were four groups on chicks on different protein diets.
 
 ### Setup
@@ -86,7 +85,7 @@ First we start with a baseline. We'll use a linear regression and add dummies fo
 --8<-- "docs/_scripts/meta-models.py:baseline-model"
 ```
 
-![baseline-model](/_static/meta-models/baseline-model.png)
+![baseline-model](../_static/meta-models/baseline-model.png)
 
 Because the model is linear the dummy variable causes the intercept to change but leaves the gradient untouched. This might not be what we want from a model.
 
@@ -94,15 +93,13 @@ So let's see how the grouped model can address this.
 
 ### Model 2: Linear Regression in GroupedPredictor
 
-The goal of the [GroupedPredictor][grouped-predictor-api] is to allow us to split up our data.
+The goal of the [`GroupedPredictor`][grouped-predictor-api] is to allow us to split up our data.
 
 The image below demonstrates what will happen.
 
-<p align="center">
-  <img src="/_static/meta-models/grouped-df.png" />
-</p>
+![grouped](../_static/meta-models/grouped-df.png)
 
-We train 5 models in total because the model will also train a fallback automatically (you can turn this off via `use_fallback=False`).
+We train 5 models in total because the model will also train a fallback automatically (you can turn this off via `use_global_model=False`).
 
 The idea behind the fallback is that we can predict something if there is a group at prediction time which is unseen during training.
 
@@ -114,19 +111,17 @@ Applying this model to the dataframe is easy.
 --8<-- "docs/_scripts/meta-models.py:grouped-model"
 ```
 
-![grouped-model](/_static/meta-models/grouped-model.png)
+![grouped-model](../_static/meta-models/grouped-model.png)
 
 Such model looks a bit better.
 
 ### Model 3: Dummy Regression in GroupedEstimation
 
-We could go a step further and train a [DummyRegressor][dummy-regressor-api] per diet per timestep.
+We could go a step further and train a [`DummyRegressor`][dummy-regressor-api] per diet per timestep.
 
 The code below works similar as the previous example but one difference is that the grouped model does not receive a dataframe but a numpy array.
 
-<p align="center">
-  <img src="/_static/meta-models/grouped-np.png" />
-</p>
+![dummy](../_static/meta-models/grouped-np.png)
 
 Note that we're also grouping over more than one column here.
 The code that does this is listed below.
@@ -135,9 +130,19 @@ The code that does this is listed below.
 --8<-- "docs/_scripts/meta-models.py:grouped-dummy-model"
 ```
 
-![grouped-dummy-model](/_static/meta-models/grouped-dummy-model.png)
+![grouped-dummy-model](../_static/meta-models/grouped-dummy-model.png)
 
 Note that these predictions seems to yield the lowest error but take it with a grain of salt since these errors are only based on the train set.
+
+### Specialized Estimators
+
+!!! info "New in version 0.8.0"
+
+Instead of using the generic `GroupedPredictor` directly, it is possible to work with _task specific_ estimators, namely: [`GroupedClassifier`][grouped-classifier-api] and [`GroupedRegressor`][grouped-regressor-api].
+
+Their specs and functionalities are the exact same of the `GroupedPredictor`[^1] but they are specialized for classification and regression tasks, respectively, by adding checks on the input estimator.
+
+[^1]: Not entirely true, as `GroupedClassifier` doesn't allow for the `shrinkage` parameter.
 
 ## Grouped Transformation
 
@@ -157,7 +162,7 @@ In these scenarios the [`GroupedTransformer`][grouped-transformer-api] can help 
 --8<-- "docs/_scripts/meta-models.py:grouped-transform"
 ```
 
-![grouped-dummy-model](/_static/meta-models/grouped-transform.png)
+![grouped-dummy-model](../_static/meta-models/grouped-transform.png)
 
 ??? example "Code for plotting the transformed data"
     ```py
@@ -171,6 +176,58 @@ You can see that there are certainly still clusters. These are caused by the fac
 This transformer also has use-cases beyond fairness. You could use this transformer to causally compensate for subgroups in your data.
 
 For example, for predicting house prices, using the surface of a house relatively to houses in the same neighborhood could be a more relevant feature than the surface relative to all houses.
+
+## Hierarchical Prediction
+
+!!! info "New in version 0.8.0"
+
+Very closely related to `GroupedPredictor` is the [`HierarchicalPredictor`][hierarchical-predictor-api] meta estimator and the two task specialized classes [`HierarchicalClassifier`][hierarchical-classifier-api] and [`HierarchicalRegressor`][hierarchical-regressor-api].
+
+These estimators fit a separate base estimator for each group in the input data in a hierarchical manner. This means that an estimator is fitted for each subsequential level in the group columns.
+
+### Difference with `GroupedPredictor`
+
+In practice what does that mean? While the APIs are fairly similar, there are a few main differences between hierarchical and grouped meta estimators:
+
+1. The first difference is the fallback method: hierarchical estimators have a fallback method that can be set to either "parent" or "raise". If set to "parent", the estimator will recursively fall back to the parent group in case the group value is not found during `.predict()`.
+
+    !!! warning
+        As a consequence of this, the **order of groups matters** and potentially a combinatoric number of estimators are fitted, one for each unique combination of group values and each level, including a global one.
+
+2. `HierarchicalClassifier` is meant to properly handle shrinkage for classification tasks - however this requires that the base estimator implements a `.predict_proba()` method.
+3. While `GroupedPredictor` is meant to be used directly, `HierarchicalPredictor` is meant to be used as a base class for other estimators such as `HierarchicalClassifier` and `HierarchicalRegressor`.
+
+## Shrinkage Functions
+
+Scikit-lego provides a set of shrinkage functions that can be used to shrink the predictions of a model in [Grouped Prediction] and [Hierarchical Predictions].
+
+The following shrinkage are available out of the box:
+
+- [`"constant"`][constant-shrinkage]: The augmented prediction for each level is the weighted average between its prediction and the augmented prediction for its parent.
+- [`"equal"`][equal-shrinkage]: Each group is weighed equally.
+- [`"min_n_obs"`][min-n-obs-shrinkage]: Use only the smallest group with a certain amount of observations.
+- [`"relative"`][relative-shrinkage]: Weigh each group according to its size.
+
+Additionally to the built-in shrinkage functions, it is possible to provide a custom shrinkage function to the `GroupedPredictor` and `HierarchicalPredictor` classes.
+
+Such function should takes a list of group sizes and returns an array of the same size with the weights (positive values) for each group.
+
+```py title="Custom shrinkage function"
+import numpy as np
+
+def exp_decay_shrinkage(group_sizes, decay=0.9):
+    """A custom shrinkage function that creates an exponential decay which is independent of the group sizes, but
+    depends on the decay parameter and the number of groups, and finally normalized to sum to 1.
+    """
+    a = decay ** np.arange(len(group_sizes), 0, -1)
+    return a / a.sum()
+
+exp_decay_shrinkage(group_sizes=[30, 20, 15], decay=0.9)
+```
+
+```console
+array([0.29889299, 0.33210332, 0.36900369])
+```
 
 ## Decayed Estimation
 
@@ -186,7 +243,7 @@ we'll demonstrate how it works by applying it on a simulated timeseries problem.
 --8<-- "docs/_scripts/meta-models.py:ts-data"
 ```
 
-![ts-data](/_static/meta-models/ts-data.png)
+![ts-data](../_static/meta-models/ts-data.png)
 
 We will create two models on this dataset. One model calculates the average value per month in our timeseries and the other does the same thing but will decay the importance of making accurate predictions for the far history.
 
@@ -194,17 +251,17 @@ We will create two models on this dataset. One model calculates the average valu
 --8<-- "docs/_scripts/meta-models.py:decay-model"
 ```
 
-![decay-model](/_static/meta-models/decay-model.png)
+![decay-model](../_static/meta-models/decay-model.png)
 
 The decay parameter has a lot of influence on the effect of the model but one can clearly see that we shift focus to the more recent data.
 
 ### Decay Functions
 
-scikit-lego provides a set of decay functions that can be used to decay the importance of older data. The default decay function used in `DecayEstimator` is the `exponential_decay` function (`decay_func="exponential"`).
+Scikit-lego provides a set of decay functions that can be used to decay the importance of older data. The default decay function used in `DecayEstimator` is the `exponential_decay` function (`decay_func="exponential"`).
 
 Out of the box there are four decay functions available:
 
-![decay-functions](/_static/meta-models/decay-functions.png)
+![decay-functions](../_static/meta-models/decay-functions.png)
 
 ??? example "Code for plotting the decay functions"
     ```py
@@ -212,12 +269,12 @@ Out of the box there are four decay functions available:
     ```
 
 The arguments of these functions can be passed along to the `DecayEstimator` class as keyword arguments:
-  
+
 ```py
 DecayEstimator(..., decay_func="linear", min_value=0.5)
 ```
 
-To see which keyword arguments are available for each decay function, please refer to the [Decay Functions API section][decay-functions]:
+To see which keyword arguments are available for each decay function, please refer to the [Decay Functions API section][decay-functions].
 
 Notice that passing a string to refer to the built-in decays is just a convenience.
 
@@ -247,7 +304,7 @@ We added the [`ConfusionBalancer`][confusion-balancer-api] as experimental featu
     --8<-- "docs/_scripts/meta-models.py:make-blobs"
     ```
 
-![make-blobs](/_static/meta-models/make-blobs.png)
+![make-blobs](../_static/meta-models/make-blobs.png)
 
 Let's take this dataset and train a simple classifier against it.
 
@@ -288,12 +345,13 @@ We'll perform an optimistic demonstration below.
 --8<-- "docs/_scripts/meta-models.py:confusion-balancer"
 ```
 
-![confusion-balancer](/_static/meta-models/confusion-balancer-results.png)
+![confusion-balancer](../_static/meta-models/confusion-balancer-results.png)
 
 ??? example "Code to generate the plot"
     ```py
     --8<-- "docs/_scripts/meta-models.py:confusion-balancer-results"
     ```
+
 It seems that we can pick a value for $\alpha$ such that the confusion matrix is balanced. there's also a modest increase in accuracy for this balancing moment.
 
 It should be emphasized though that this feature is **experimental**. There have been dataset/model combinations where this effect seems to work very well while there have also been situations where this trick does not work at all.
@@ -316,8 +374,8 @@ Sure, you can get regions where you are close to zero, but modelling an output o
 
 What we can do circumvent these problems is the following:
 
-1. Train a classifier to tell us whether the target is zero, or not.
-2. Train a regressor on all samples with a non-zero target.
+1. Train a **classifier** to tell us whether the target is zero, or not.
+2. Train a **regressor** on all samples with a non-zero target.
 
 By putting these two together in an obvious way, we get the [`ZeroInflatedRegressor`][zero-inflated-api]. You can use it like this:
 
@@ -326,11 +384,29 @@ By putting these two together in an obvious way, we get the [`ZeroInflatedRegres
 ```
 
 ```console
-ZIR (RFC+RFR) r²: 0.8992404366385873
-RFR r²: 0.8516522752031502
+ZIR (RFC+RFR) r²: 0.8579468997736154
+RFR r²: 0.7691291933110612
 ```
 
-## OutlierClassifier
+If the underlying classifier is able to predict the _probability_ of a sample to be zero (i.e. it implements a `predict_proba` method), then the `ZeroInflatedRegressor` can be used to predict the probability of a sample being non-zero _times_doc the expected value of such sample.
+
+This quantity is sometimes called _risk estimate_ or _expected impact_, however, to adhere to scikit-learn convention, we made it accessible via the  `score_samples` method.
+
+!!! warning "About `predict_proba`"
+    The `predict_proba` method of the classifier does not always return actual probabilities.
+
+    For this reason if you want to use the `score_samples` method, it is recommended to train with a classifier wrapped by the [`CalibratedClassifierCV`][calibrated-classifier-api] class from scikit-learn to calibrate the probabilities.
+
+```py title="score_samples"
+--8<-- "docs/_scripts/meta-models.py:zero-inflated-score-samples"
+```
+
+```console
+Predict=[4.91 0.   0.   0.05 0.  ]
+Scores=[3.73 0.   0.11 0.03 0.06]
+```
+
+## Outlier Classifier
 
 Outlier models are unsupervised so they don't have `predict_proba` or `score` methods.
 
@@ -384,16 +460,91 @@ The `OutlierClassifier` can be combined with any classification model in the `St
 
 --8<-- "docs/_static/meta-models/outlier-classifier-stacking.html"
 
-[thresholder-api]: /api/meta#sklego.meta.thresholder.Thresholder
-[grouped-predictor-api]: /api/meta#sklego.meta.grouped_predictor.GroupedPredictor
-[grouped-transformer-api]: /api/meta#sklego.meta.grouped_transformer.GroupedTransformer
-[decay-api]: /api/meta#sklego.meta.decay_estimator.DecayEstimator
-[decay-functions]: /api/decay-functions
-[confusion-balancer-api]: /api/meta#sklego.meta.confusion_balancer.ConfusionBalancer
-[zero-inflated-api]: /api/meta#sklego.meta.zero_inflated_regressor.ZeroInflatedRegressor
-[outlier-classifier-api]: /api/meta#sklego.meta.outlier_classifier.OutlierClassifier
+## Ordinal Classification
+
+Ordinal classification (sometimes also referred to as Ordinal Regression) involves predicting an ordinal target variable, where the classes have a meaningful order.
+Examples of this kind of problem are: predicting customer satisfaction on a scale from 1 to 5, predicting the severity of a disease, predicting the quality of a product, etc.
+
+The [`OrdinalClassifier`][ordinal-classifier-api] is a meta-model that can be used to transform any classifier into an ordinal classifier by fitting N-1 binary classifiers, each handling a specific class boundary, namely: $P(y <= 1), P(y <= 2), ..., P(y <= N-1)$.
+
+This implementation is based on the paper [A simple approach to ordinal classification][ordinal-classification-paper] and it allows to predict the ordinal probabilities of each sample belonging to a particular class.
+
+??? tip "Graphical representation"
+    An image (from the paper itself) is worth a thousand words:
+    ![ordinal-classification](../_static/meta-models/ordinal-classification.png)
+
+!!! note "mord library"
+    If you are looking for a library that implements other ordinal classification algorithms, you can have a look at the [mord][mord] library.
+
+```py title="Ordinal Data"
+--8<-- "docs/_scripts/meta-models.py:ordinal-classifier-data"
+```
+
+--8<-- "docs/_static/meta-models/ordinal_data.md"
+
+Description of the dataset from [statsmodels tutorial][statsmodels-ordinal-regression]:
+
+> This dataset is about the probability for undergraduate students to apply to graduate school given three exogenous variables:
+>
+> - their grade point average (`gpa`), a float between 0 and 4.
+> - `pared`, a binary that indicates if at least one parent went to graduate school.
+> - `public`, a binary that indicates if the current undergraduate institution of the student is > public or private.
+>
+> `apply`, the target variable is categorical with ordered categories: "unlikely" < "somewhat likely" < "very likely".
+>
+> [...]
+>
+> For more details see the the Documentation of OrderedModel, [the UCLA webpage][ucla-webpage].
+
+The only transformation we are applying to the data is to convert the target variable to an ordinal categorical variable by mapping the ordered categories to integers using their (pandas) category codes.
+
+We are now ready to train a [`OrdinalClassifier`][ordinal-classifier-api] on this dataset:
+
+```py title="OrdinalClassifier"
+--8<-- "docs/_scripts/meta-models.py:ordinal-classifier"
+```
+
+> [[0.54883853 0.36225347 0.088908]]
+
+### Probability Calibration
+
+The `OrdinalClassifier` emphasizes the importance of proper probability estimates for its functionality. It is recommended to use the [`CalibratedClassifierCV`][calibrated-classifier-api] class from scikit-learn to calibrate the probabilities of the binary classifiers.
+
+Probability calibration is _not_ enabled by default, but we provide a convenient keyword argument `use_calibration` to enable it as follows:
+
+```py title="OrdinalClassifier with probability calibration"
+--8<-- "docs/_scripts/meta-models.py:ordinal-classifier-with-calibration"
+```
+
+### Computation Time
+
+As a meta-estimator, the `OrdinalClassifier` fits N-1 binary classifiers, which may be computationally expensive, especially with a large number of samples, features, or a complex classifier.
+
+[thresholder-api]: ../../api/meta#sklego.meta.thresholder.Thresholder
+[grouped-predictor-api]: ../../api/meta#sklego.meta.grouped_predictor.GroupedPredictor
+[grouped-classifier-api]: ../../api/meta#sklego.meta.grouped_predictor.GroupedClassifier
+[grouped-regressor-api]: ../../api/meta#sklego.meta.grouped_predictor.GroupedRegressor
+[grouped-transformer-api]: ../../api/meta#sklego.meta.grouped_transformer.GroupedTransformer
+[hierarchical-predictor-api]: ../../api/meta#sklego.meta.hierarchical_predictor.HierarchicalPredictor
+[hierarchical-classifier-api]: ../../api/meta#sklego.meta.hierarchical_predictor.HierarchicalClassifier
+[hierarchical-regressor-api]: ../../api/meta#sklego.meta.hierarchical_predictor.HierarchicalRegressor
+[constant-shrinkage]: ../../api/shrinkage-functions#sklego.meta._shrinkage_utils.constant_shrinkage
+[equal-shrinkage]: ../../api/shrinkage-functions#sklego.meta._shrinkage_utils.equal_shrinkage
+[min-n-obs-shrinkage]: ../../api/shrinkage-functions#sklego.meta._shrinkage_utils.min_n_obs_shrinkage
+[relative-shrinkage]: ../../api/shrinkage-functions#sklego.meta._shrinkage_utils.relative_shrinkage
+[decay-api]: ../../api/meta#sklego.meta.decay_estimator.DecayEstimator
+[decay-functions]: ../../api/decay-functions
+[confusion-balancer-api]: ../../api/meta#sklego.meta.confusion_balancer.ConfusionBalancer
+[zero-inflated-api]: ../../api/meta#sklego.meta.zero_inflated_regressor.ZeroInflatedRegressor
+[outlier-classifier-api]: ../../api/meta#sklego.meta.outlier_classifier.OutlierClassifier
+[ordinal-classifier-api]: ../../api/meta#sklego.meta.ordinal_classification.OrdinalClassifier
 
 [standard-scaler-api]: https://scikit-learn.org/stable/modules/generated/sklearn.preprocessing.StandardScaler.html
 [stacking-classifier-api]: https://scikit-learn.org/stable/modules/generated/sklearn.ensemble.StackingClassifier.html#sklearn.ensemble.StackingClassifier
 [dummy-regressor-api]: https://scikit-learn.org/stable/modules/generated/sklearn.dummy.DummyRegressor.html
 [imb-learn]: https://imbalanced-learn.org/stable/
+[ordinal-classification-paper]: https://www.cs.waikato.ac.nz/~eibe/pubs/ordinal_tech_report.pdf
+[mord]: https://pythonhosted.org/mord/
+[statsmodels-ordinal-regression]: https://www.statsmodels.org/dev/examples/notebooks/generated/ordinal_regression.html
+[ucla-webpage]: https://stats.oarc.ucla.edu/r/dae/ordinal-logistic-regression/
+[calibrated-classifier-api]: https://scikit-learn.org/stable/modules/generated/sklearn.calibration.CalibratedClassifierCV.html

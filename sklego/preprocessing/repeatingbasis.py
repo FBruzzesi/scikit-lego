@@ -1,8 +1,10 @@
+from warnings import warn
+
 import numpy as np
 from sklearn.base import BaseEstimator, TransformerMixin
 from sklearn.compose import ColumnTransformer
-from sklearn.utils import check_array
 from sklearn.utils.validation import check_is_fitted
+from sklearn_compat.utils.validation import validate_data
 
 
 class RepeatingBasisFunction(TransformerMixin, BaseEstimator):
@@ -19,6 +21,17 @@ class RepeatingBasisFunction(TransformerMixin, BaseEstimator):
     when moving from the max to the min of the input range. As a result these repeating basis functions can capture how
     close each datapoint is to the center of each repeating basis function, even when the input data has a circular
     nature.
+
+    !!! warning
+        We suggest to use
+        [scikit-learn `SplineTransformer`](https://scikit-learn.org/stable/modules/generated/sklearn.preprocessing.SplineTransformer.html)
+        with `extrapolation='periodic'` instead of scikit-lego `RepeatingBasisFunction` transformer:
+
+        ```py
+        from sklearn.preprocessing import SplineTransformer
+
+        spline = SplineTransformer(..., extrapolation='periodic')
+        ```
 
     Parameters
     ----------
@@ -41,9 +54,32 @@ class RepeatingBasisFunction(TransformerMixin, BaseEstimator):
     ----------
     pipeline_ : ColumnTransformer
         Fitted `ColumnTransformer` object used to transform data with repeating basis functions.
+
+    Examples
+    --------
+    ```py
+    import pandas as pd
+    from sklego.preprocessing import RepeatingBasisFunction
+
+    df = pd.DataFrame({
+        "user_id": [101, 102, 103],
+        "created_day": [5, 1, 7]
+    })
+    RepeatingBasisFunction(column="created_day", input_range=(1,7)).fit_transform(df)
+    # array([[0.06217652, 0.00432024, 0.16901332, 0.89483932, 0.64118039],
+    #        [1.        , 0.36787944, 0.01831564, 0.01831564, 0.36787944],
+    #        [1.        , 0.36787944, 0.01831564, 0.01831564, 0.36787944]])
+    ```
     """
 
     def __init__(self, column=0, remainder="drop", n_periods=12, input_range=None, width=1.0):
+        msg = (
+            "Please consider using scikit-learn `SplineTransformer` with `extrapolation='periodic'` instead.\n\n"
+            "Hint: `from sklearn.preprocessing import SplineTransformer`\n"
+            "Docs: https://scikit-learn.org/stable/modules/generated/sklearn.preprocessing.SplineTransformer.html"
+        )
+        warn(msg, UserWarning)
+
         self.column = column
         self.remainder = remainder
         self.n_periods = n_periods
@@ -147,7 +183,12 @@ class _RepeatingBasisFunction(TransformerMixin, BaseEstimator):
         self : _RepeatingBasisFunction
             The fitted transformer.
         """
-        X = check_array(X, estimator=self)
+        _, n_cols = X.shape
+        if n_cols > 1:
+            msg = f"Expected exactly one column to `_RepeatingBasisFunction`, found {n_cols}"
+            raise ValueError(msg)
+
+        X = validate_data(self, X=X, ensure_2d=True, reset=True, dtype="numeric")
 
         # find min and max for standardization if not given explicitly
         if self.input_range is None:
@@ -179,11 +220,8 @@ class _RepeatingBasisFunction(TransformerMixin, BaseEstimator):
         ValueError
             If X has more than one column, as this transformer only accepts one feature as input.
         """
-        X = check_array(X, estimator=self, ensure_2d=True)
         check_is_fitted(self, ["bases_", "width_"])
-        # This transformer only accepts one feature as input
-        if X.shape[1] != 1:
-            raise ValueError(f"X should have exactly one column, it has: {X.shape[1]}")
+        X = validate_data(self, X=X, ensure_2d=True, reset=False)
 
         # MinMax Scale to 0-1
         X = (X - self.input_range[0]) / (self.input_range[1] - self.input_range[0])

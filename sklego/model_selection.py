@@ -3,14 +3,45 @@ from datetime import timedelta
 from itertools import combinations
 from warnings import warn
 
+import narwhals.stable.v1 as nw
 import numpy as np
 import pandas as pd
 from sklearn.exceptions import NotFittedError
-from sklearn.model_selection._split import _BaseKFold, check_array
+from sklearn.model_selection._split import _BaseKFold
 from sklearn.utils.validation import indexable
+from sklearn_compat.utils.validation import check_array
 
 from sklego.base import Clusterer
 from sklego.common import sliding_window
+
+# Offset aliases and their duration in nanoseconds, from coarsest to finest.
+# `D` is deliberately absent: it denotes a calendar day, which is not a fixed
+# duration, so it cannot describe a timedelta.
+_FREQ_ALIASES: tuple[tuple[str, int], ...] = (
+    ("h", 3_600_000_000_000),
+    ("min", 60_000_000_000),
+    ("s", 1_000_000_000),
+    ("ms", 1_000_000),
+    ("us", 1_000),
+    ("ns", 1),
+)
+
+
+def _timedelta_to_freqstr(delta: pd.Timedelta) -> str:
+    """Render a timedelta as a pandas offset alias, using the coarsest unit that divides it evenly.
+
+    NOTE: Matches what `pandas.tseries.frequencies.to_offset(...).freqstr` returns on pandas 3,
+    where the `Day` offset models a calendar day and so an exact timedelta of whole days renders
+    in hours (`"24h"`, not `"D"`).
+    That function is not called directly because pandas 2 still renders those deltas as `"D"`,
+    and this column should not change meaning with the installed pandas version.
+    """
+    total_ns: int = delta // pd.Timedelta(1, "ns")
+
+    # The trailing ("ns", 1) entry divides any integer, so a match is always found.
+    alias, unit_ns = next((alias, unit_ns) for alias, unit_ns in _FREQ_ALIASES if total_ns % unit_ns == 0)
+    n = total_ns // unit_ns
+    return alias if n == 1 else f"{n}{alias}"
 
 
 class TimeGapSplit:
@@ -28,11 +59,11 @@ class TimeGapSplit:
     Each validation fold doesn't overlap. The entire `window` moves by 1 `valid_duration` until there is not enough
     data.
 
-    If this would lead to more splits then specified with `n_splits`, the `window` moves by `valid_duration` times the
+    If this would lead to more splits than specified with `n_splits`, the `window` moves by `valid_duration` times the
     fraction of possible splits and requested splits:
 
-    - `n_possible_splits = (total_length - train_duration-gap_duration) // valid_duration`
-    - `time_shift = valid_duration * n_possible_splits / n_slits`
+    - `n_possible_splits = (total_length - train_duration - gap_duration) // valid_duration`
+    - `time_shift = valid_duration * n_possible_splits / n_splits`
 
     so the CV spans the whole dataset.
 
@@ -44,10 +75,14 @@ class TimeGapSplit:
 
     Parameters
     ----------
-    date_serie : pd.Series
+    date_series : Series
         Series with the date, that should have all the indices of X used in the split() method.
+        If the Series is not pandas-like (for example, if it's a Polars Series, which does not have
+        an index) then it must the same length as the `X` and `y` objects passed to `split`.
     valid_duration : datetime.timedelta
         Retraining period.
+    stride_duration : datetime.timedelta | None
+        The time shift for the training period. If `None`, then it fallbacks to `valid_duration` value.
     train_duration : datetime.timedelta | None, default=None
         Historical training data.
     gap_duration : datetime.timedelta, default=timedelta(0)
@@ -56,8 +91,9 @@ class TimeGapSplit:
 
         This period is dropped at the end of your training folds due to lack of recent data.
 
-        In production you would have not been able to create the target for that period, and you would have drop it from
+        In production you would have not been able to create the target for that period, and you would have to drop it from
         the training data.
+
     n_splits : int | None, default=None
         Number of splits.
     window : Literal["rolling", "expanding"], default="rolling"
@@ -65,48 +101,140 @@ class TimeGapSplit:
 
         - `"rolling"` window has fixed size and is shifted entirely.
         - `"expanding"` left side of window is fixed, right border increases each fold.
+    date_serie : Series | None, default=None
+        Backward-compatible alias for `date_series`.
+
+    Notes
+    -----
+    Native cross-dataframe support is achieved using
+    [Narwhals](https://narwhals-dev.github.io/narwhals/){:target="_blank"}.
+    Supported dataframes are:
+
+    - pandas
+    - Polars (eager)
+    - Modin
+    - cuDF
+
+    See [Narwhals docs](https://narwhals-dev.github.io/narwhals/extending/){:target="_blank"} for an up-to-date list
+    (and to learn how you can add your dataframe library to it!), though note that only those
+    convertible to `numpy` arrays will work with this class.
+
+    Examples
+    --------
+    ```py
+    from datetime import timedelta
+    import numpy as np
+    import pandas as pd
+    from sklego.model_selection import TimeGapSplit
+
+    # Create dataset
+    np.random.seed(1)
+    num_rows = 50
+    df = pd.DataFrame(np.random.randn(num_rows, 4)).rename(columns={0: 'c1', 1: 'c2', 2: 'c3', 3: 'c4'})
+    df['date'] = pd.date_range("2024-01-01", periods=num_rows, freq="h")
+
+    # Define parameters
+    td = timedelta(hours=15)
+    vd = timedelta(hours=6)
+    gd = timedelta(hours=4)
+
+    tgs = TimeGapSplit(date_serie=df['date'], train_duration=td, valid_duration=vd, gap_duration=gd)
+    # Print the summary of the first fold
+    print(tgs.summary(df).iloc[0])
+
+    ### Start date     2024-01-01 00:00:00
+    ### End date       2024-01-01 14:00:00
+    ### Period             0 days 14:00:00
+    ### frequency                        h
+    ### Unique days                      1
+    ### nbr samples                     15
+    ### Name: (0, train), dtype: object
+
+    # Generate the folds
+    tg_cv = tgs.split(df)
+
+    # Print train/test groups in each fold
+    for i, (train_index, test_index) in enumerate(tg_cv):
+        print(f'Fold {i}: Train indices: {train_index}, Test indices: {test_index}')
+
+    ### Fold 0: Train indices: [ 0  1  2  3  4  5  6  7  8  9 10 11 12 13 14], Test indices: [19 20 21 22 23 24]
+    ### Fold 1: Train indices: [ 6  7  8  9 10 11 12 13 14 15 16 17 18 19 20], Test indices: [25 26 27 28 29 30]
+    ### Fold 2: Train indices: [12 13 14 15 16 17 18 19 20 21 22 23 24 25 26], Test indices: [31 32 33 34 35 36]
+    ### Fold 3: Train indices: [18 19 20 21 22 23 24 25 26 27 28 29 30 31 32], Test indices: [37 38 39 40 41 42]
+    ### Fold 4: Train indices: [24 25 26 27 28 29 30 31 32 33 34 35 36 37 38], Test indices: [43 44 45 46 47 48]
+    ```
     """
 
     def __init__(
         self,
-        date_serie,
-        valid_duration,
+        date_series=None,
+        valid_duration=None,
+        stride_duration=None,
         train_duration=None,
         gap_duration=timedelta(0),
         n_splits=None,
         window="rolling",
+        date_serie=None,
     ):
+        if valid_duration is None:
+            raise ValueError("`valid_duration` has to be defined")
+
+        match (date_series, date_serie):
+            case (None, None):
+                msg = "`date_series` cannot be None"
+                raise ValueError(msg)
+            case (value, None):
+                self.date_series = nw.from_native(value, series_only=True).alias("__date__")
+            case (None, value):
+                msg = (
+                    "Please use `date_series` instead of `date_serie`, "
+                    "`date_serie` will be deprecated in future versions"
+                )
+                warn(msg, DeprecationWarning)
+                self.date_series = nw.from_native(value, series_only=True).alias("__date__")
+            case (_, _):
+                msg = "Cannot provide both `date_series` and `date_serie`"
+                raise ValueError(msg)
+
+        # If stride length is not defined, set it equal to the length validation set
+        if stride_duration is None:
+            stride_duration = valid_duration
+
+        if stride_duration <= timedelta(milliseconds=0):
+            msg = f"`stride_duration` should be a positive timedelta, found {stride_duration}"
+            raise ValueError(msg)
+
         if (train_duration is None) and (n_splits is None):
             raise ValueError("Either train_duration or n_splits have to be defined")
 
         if (train_duration is not None) and (train_duration <= gap_duration):
-            raise ValueError(
-                "gap_duration is longer than train_duration, it should be shorter."
-            )
+            raise ValueError("gap_duration is longer than train_duration, it should be shorter.")
 
-        if not date_serie.index.is_unique:
-            raise ValueError("date_serie doesn't have a unique index")
+        if (train_duration is not None) and (train_duration <= stride_duration):
+            raise ValueError("stride_duration is longer than train_duration, it should be shorter.")
 
-        self.date_serie = date_serie.copy()
-        self.date_serie = self.date_serie.rename("__date__")
+        self.date_serie = self.date_series
         self.train_duration = train_duration
         self.valid_duration = valid_duration
         self.gap_duration = gap_duration
+        self.stride_duration = stride_duration
         self.n_splits = n_splits
         self.window = window
 
     def _join_date_and_x(self, X):
-        """Creates a DataFrame indexed by the pandas index (the same as `date_serie`) with date column joined with that
+        """Creates a DataFrame indexed by the pandas index (the same as `date_series`) with date column joined with that
         index and with the 'numpy index' column (i.e. just a range) that is required for the output and the rest of
         sklearn.
 
+        If the user is working with index-less dataframes (e.g. Polars), then `self.date_series` needs to be the same
+        length as `X`.
+
         Parameters
         ----------
-        X : pd.DataFrame
+        X : DataFrame
             Dataframe with the data to split
         """
-        X_index_df = pd.DataFrame(range(len(X)), columns=["np_index"], index=X.index)
-        X_index_df = X_index_df.join(self.date_serie)
+        X_index_df = nw.maybe_align_index(self.date_series, X).to_frame().with_row_index("np_index")
 
         return X_index_df
 
@@ -115,7 +243,7 @@ class TimeGapSplit:
 
         Parameters
         ----------
-        X : pd.DataFrame
+        X : DataFrame
             Dataframe with the data to split.
         y : array-like | None, default=None
             Ignored, present for compatibility.
@@ -128,13 +256,13 @@ class TimeGapSplit:
             Train and test indices of the same fold.
         """
 
+        X = nw.from_native(X, eager_only=True)
         X_index_df = self._join_date_and_x(X)
-        X_index_df = X_index_df.sort_values("__date__", ascending=True)
+        X_index_df = X_index_df.sort("__date__", descending=False)
 
         if len(X) != len(X_index_df):
             raise AssertionError(
-                "X and X_index_df are not the same length, "
-                "there must be some index missing in 'self.date_serie'"
+                "X and X_index_df are not the same length, there must be some index missing in 'self.date_series'"
             )
 
         date_min = X_index_df["__date__"].min()
@@ -143,68 +271,50 @@ class TimeGapSplit:
 
         if (self.train_duration is None) and (self.n_splits is not None):
             self.train_duration = date_length - (
-                self.gap_duration + self.valid_duration * self.n_splits
+                self.gap_duration + self.valid_duration + (self.n_splits - 1) * self.stride_duration
             )
 
-        if (self.train_duration is not None) and (
-            self.train_duration <= self.gap_duration
-        ):
-            raise ValueError(
-                "gap_duration is longer than train_duration, it should be shorter."
-            )
+        if (self.train_duration is not None) and (self.train_duration <= self.gap_duration):
+            raise ValueError("gap_duration is longer than train_duration, it should be shorter.")
 
         n_split_max = (
-            date_length - self.train_duration - self.gap_duration
-        ) / self.valid_duration
+            1 + (date_length - self.train_duration - self.gap_duration - self.valid_duration) / self.stride_duration
+        )
+
         if self.n_splits:
             if n_split_max < self.n_splits:
                 raise ValueError(
-                    (
-                        "Number of folds requested = {1} are greater"
-                        " than maximum  ={0} possible without"
-                        " overlapping validation sets."
-                    ).format(n_split_max, self.n_splits)
+                    f"Number of folds requested = {self.n_splits} are greater"
+                    f" than maximum  ={n_split_max} possible"
+                    " based on the given values."
                 )
 
         current_date = date_min
         start_date = date_min
-        # if the n_splits is smaller than what would usually be done for train val and gap duration,
-        # the next fold is slightly further in time than just valid_duration
+        # if the n_splits is smaller than what would usually be done for train, validation, stride and gap duration,
+        # the next fold is slightly further in time than just stride_duration
         if self.n_splits is not None:
-            time_shift = self.valid_duration * n_split_max / self.n_splits
+            time_shift = self.stride_duration * n_split_max / self.n_splits
         else:
-            time_shift = self.valid_duration
+            time_shift = self.stride_duration
         while True:
-            if (
-                current_date + self.train_duration + time_shift + self.gap_duration
-                > date_max
-            ):
+            if current_date + self.train_duration + time_shift + self.gap_duration > date_max:
                 break
 
-            X_train_df = X_index_df[
-                (X_index_df["__date__"] >= start_date)
-                & (X_index_df["__date__"] < current_date + self.train_duration)
-            ]
-            X_valid_df = X_index_df[
-                (
-                    X_index_df["__date__"]
-                    >= current_date + self.train_duration + self.gap_duration
-                )
-                & (
-                    X_index_df["__date__"]
-                    < current_date
-                    + self.train_duration
-                    + self.valid_duration
-                    + self.gap_duration
-                )
-            ]
+            X_train_df = X_index_df.filter(
+                nw.col("__date__") >= start_date, nw.col("__date__") < current_date + self.train_duration
+            )
+            X_valid_df = X_index_df.filter(
+                nw.col("__date__") >= current_date + self.train_duration + self.gap_duration,
+                nw.col("__date__") < current_date + self.train_duration + self.valid_duration + self.gap_duration,
+            )
 
             current_date = current_date + time_shift
             if self.window == "rolling":
                 start_date = current_date
             yield (
-                X_train_df["np_index"].values,
-                X_valid_df["np_index"].values,
+                X_train_df["np_index"].to_numpy(),
+                X_valid_df["np_index"].to_numpy(),
             )
 
     def get_n_splits(self, X=None, y=None, groups=None):
@@ -212,7 +322,7 @@ class TimeGapSplit:
 
         Parameters
         ----------
-        X : pd.DataFrame
+        X : DataFrame
             Dataframe with the data to split.
         y : array-like | None, default=None
             Ignored, present for compatibility.
@@ -231,59 +341,119 @@ class TimeGapSplit:
 
         Parameters
         ----------
-        X : pd.DataFrame
+        X : DataFrame
             Dataframe with the data to split.
 
         Returns
         -------
-        pd.DataFrame
+        DataFrame
             Summary of all folds.
         """
-        summary = []
+        X = nw.from_native(X, eager_only=True)
         X_index_df = self._join_date_and_x(X)
 
-        def get_split_info(X, indices, j, part, summary):
-            dates = X_index_df.iloc[indices]["__date__"]
+        summary = {
+            "Start date": [],
+            "End date": [],
+            "Period": [],
+            "frequency": [],
+            "Unique days": [],
+            "nbr samples": [],
+            "part": [],
+            "fold": [],
+        }
+        native_namespace = nw.get_native_namespace(X)
+
+        def update_split_info(indices, j, part, summary):
+            dates = X_index_df["__date__"][indices]
             mindate = dates.min()
             maxdate = dates.max()
 
-            s = pd.Series(
-                {
-                    "Start date": mindate,
-                    "End date": maxdate,
-                    "Period": pd.to_datetime(maxdate, format="%Y%m%d")
-                    - pd.to_datetime(mindate, format="%Y%m%d"),
-                    "Unique days": len(dates.unique()),
-                    "nbr samples": len(indices),
-                },
-                name=(j, part),
-            )
-            summary.append(s)
-            return summary
+            try:
+                n_unique = dates.dt.date().n_unique()
+            except NotImplementedError:
+                # Added convert_dtypes to avoid NotImplementedError if pandas default backend is being used (we are using a pandas dataframe).
+                dates_converted = nw.from_native(
+                    nw.to_native(dates).convert_dtypes(dtype_backend="pyarrow"), eager_only=True, series_only=True
+                )
+                n_unique = dates_converted.dt.date().n_unique()
+
+            # Calculate the frequency of data as the mode of the difference of successive data points
+            freq = _timedelta_to_freqstr(dates.diff().to_pandas().value_counts().index[0])
+
+            # Populate the summary dictionary for current fold
+            summary["Start date"].append(mindate)
+            summary["End date"].append(maxdate)
+            summary["Period"].append(maxdate - mindate)
+            summary["frequency"].append(freq)
+            summary["Unique days"].append(n_unique)
+            summary["nbr samples"].append(len(indices))
+            summary["part"].append(part)
+            summary["fold"].append(j)
 
         j = 0
-        for i in self.split(X):
-            summary = get_split_info(X, i[0], j, "train", summary)
-            summary = get_split_info(X, i[1], j, "valid", summary)
+        for i in self.split(nw.to_native(X)):
+            train_info = nw.to_native(nw.new_series(name="tmp", values=i[0], native_namespace=native_namespace))
+            valid_info = nw.to_native(nw.new_series(name="tmp", values=i[1], native_namespace=native_namespace))
+            update_split_info(train_info, j, "train", summary)
+            update_split_info(valid_info, j, "valid", summary)
             j = j + 1
 
-        return pd.DataFrame(summary)
+        result = nw.from_dict(summary, native_namespace=native_namespace)
+        result = nw.maybe_set_index(result, ["fold", "part"])
+        return nw.to_native(result)
 
 
-class KlusterFoldValidation:
-    """KlusterFold cross validator. Create folds based on provided cluster method
+def KlusterFoldValidation(**kwargs):
+    warn(
+        "Please use `ClusterFoldValidation` instead of `KlusterFoldValidation`."
+        "We will use correct spelling going forward and `KlusterFoldValidation` will be deprecated.",
+        DeprecationWarning,
+    )
+    return ClusterFoldValidation(**kwargs)
+
+
+class ClusterFoldValidation:
+    """Cross validator that creates folds based on provided cluster method.
+    This ensures that data points in the same cluster are not split across different folds.
+
+    !!! info "New in version 0.8.2"
 
     Parameters
     ----------
     cluster_method : Clusterer
         Clustering method to use for the fold validation.
+
+    Examples
+    --------
+    ```py
+    from sklearn.cluster import KMeans
+    from sklearn.datasets import make_blobs
+    from sklego.model_selection import ClusterFoldValidation
+
+    # Create dataset
+    num_clusters = 2
+    X, y = make_blobs(n_samples=8, centers=num_clusters, random_state=1)
+
+    # Create clusters using KMeans clustering
+    kmeans = KMeans(n_clusters=num_clusters, random_state=1).fit(X)
+    clusterCV = ClusterFoldValidation(kmeans)
+
+    # Split into folds
+    cv_idx = clusterCV.split(X)
+
+    # Print train/test groups in each fold
+    for i, (train_index, test_index) in enumerate(cv_idx):
+        print(f'Fold {i}: Train indices: {train_index}, Test indices: {test_index}')
+
+    ### Fold 0: Train indices: [1 2 5 7], Test indices: [0 3 4 6]
+    ### Fold 1: Train indices: [0 3 4 6], Test indices: [1 2 5 7]
+    ```
     """
 
     def __init__(self, cluster_method=None):
         if not isinstance(cluster_method, Clusterer):
-            raise ValueError(
-                "The KlusterFoldValidation only works on cluster methods with .fit_predict."
-            )
+            raise ValueError("The KlusterFoldValidation only works on cluster methods with .fit_predict.")
 
         self.cluster_method = cluster_method
         self.n_splits = None
@@ -315,9 +485,7 @@ class KlusterFoldValidation:
         self.n_splits = len(np.unique(clusters))
 
         if self.n_splits < 2:
-            raise ValueError(
-                f"Clustering method resulted in {self.n_splits} cluster, too few for fold validation"
-            )
+            raise ValueError(f"Clustering method resulted in {self.n_splits} cluster, too few for fold validation")
 
         for label in np.unique(clusters):
             yield (
@@ -364,6 +532,44 @@ class GroupTimeSeriesSplit(_BaseKFold):
     ----------
     n_splits : int
         Amount of (train, test) splits to generate.
+
+    Examples
+    --------
+    ```py
+    import numpy as np
+    from sklego.model_selection import GroupTimeSeriesSplit
+
+    # The example reflects the table provided in the class description
+
+    # Create dataset
+    np.random.seed(1)
+    X = np.random.randn(11, 4)
+    y = np.abs(X[:, 2] * X[:, 3])
+    groups = np.array([2021, 2021, 2021, 2022, 2022, 2022, 2023, 2023, 2023, 2024, 2024]) # years
+
+    # Split into folds
+    n_splits = 3
+    cv = GroupTimeSeriesSplit(n_splits)
+    ts_grouped_cv = cv.split(X, y, groups)
+
+    print(cv.summary().iloc[3]) # print summary
+
+    ### index                         2024
+    ### observations                     2
+    ### group                            3
+    ### obs_per_group                    2
+    ### ideal_group_size                 3
+    ### diff_from_ideal_group_size      -1
+    ### Name: 3, dtype: int64
+
+    # Print train/test groups in each fold
+    for i, (train_index, test_index) in enumerate(ts_grouped_cv):
+        print(f'Fold {i}: Train indices: {train_index}, Test indices: {test_index}')
+
+    ### Fold 0: Train indices: [0 1 2], Test indices: [3 4 5]
+    ### Fold 1: Train indices: [3 4 5], Test indices: [6 7 8]
+    ### Fold 2: Train indices: [6 7 8], Test indices: [ 9 10]
+    ```
     """
 
     # table above inspired by sktime
@@ -371,8 +577,7 @@ class GroupTimeSeriesSplit(_BaseKFold):
     def __init__(self, n_splits):
         if not isinstance(n_splits, numbers.Integral):
             raise ValueError(
-                "The number of folds must be of Integral type. "
-                "%s of type %s was passed." % (n_splits, type(n_splits))
+                "The number of folds must be of Integral type. %s of type %s was passed." % (n_splits, type(n_splits))
             )
         n_splits = int(n_splits)
 
@@ -380,7 +585,7 @@ class GroupTimeSeriesSplit(_BaseKFold):
             raise ValueError(
                 "k-fold cross-validation requires at least one"
                 " train/test split by setting n_splits=2 or more,"
-                " got n_splits={0}.".format(n_splits)
+                f" got n_splits={n_splits}."
             )
 
         self.n_splits = n_splits
@@ -399,21 +604,12 @@ class GroupTimeSeriesSplit(_BaseKFold):
             return (
                 self._grouped_df.sort_index()
                 .assign(group=lambda df: df["group"].astype(int))
-                .assign(
-                    obs_per_group=lambda df: df.groupby("group")[
-                        "observations"
-                    ].transform("sum")
-                )
+                .assign(obs_per_group=lambda df: df.groupby("group")["observations"].transform("sum"))
                 .assign(ideal_group_size=round(self._ideal_group_size))
-                .assign(
-                    diff_from_ideal_group_size=lambda df: df["obs_per_group"]
-                    - df["ideal_group_size"]
-                )
+                .assign(diff_from_ideal_group_size=lambda df: df["obs_per_group"] - df["ideal_group_size"])
             )
         except AttributeError:
-            raise AttributeError(
-                ".summary() only works after having ran .split(X, y, groups)."
-            )
+            raise AttributeError(".summary() only works after having ran .split(X, y, groups).")
 
     def split(self, X=None, y=None, groups=None):
         """Generate the train-test splits of all the folds
@@ -437,12 +633,7 @@ class GroupTimeSeriesSplit(_BaseKFold):
         X, y, groups = indexable(X, y, groups)
         n_groups = np.unique(groups).shape[0]
         if self.n_splits >= n_groups:
-            raise ValueError(
-                (
-                    "n_splits({0}) must be less than the amount"
-                    " of unique groups({1})."
-                ).format(self.n_splits, n_groups)
-            )
+            raise ValueError(f"n_splits({self.n_splits}) must be less than the amount of unique groups({n_groups}).")
         return list(self._iter_test_indices(X, y, groups))
 
     def get_n_splits(self, X=None, y=None, groups=None):
@@ -479,11 +670,7 @@ class GroupTimeSeriesSplit(_BaseKFold):
             If runtime is expected to take over one minute.
         """
         unique_groups = len(set(groups))
-        warning = (
-            "Finding the optimal split points"
-            " with {0} unique groups and n_splits at {1}"
-            " can take several minutes."
-        ).format(unique_groups, self.n_splits)
+        warning = f"Finding the optimal split points with {unique_groups} unique groups and n_splits at {self.n_splits} can take several minutes."
         if self.n_splits == 4 and unique_groups > 250:
             warn(
                 warning + " Consider to decrease n_splits to 3 or lower.",
@@ -520,10 +707,7 @@ class GroupTimeSeriesSplit(_BaseKFold):
             Train and test indices of the same fold.
         """
         self._check_for_long_estimated_runtime(groups)
-        (
-            self._first_split_index,
-            self._last_split_index,
-        ) = self._calc_first_and_last_split_index(groups=groups)
+        self._first_split_index, self._last_split_index = self._calc_first_and_last_split_index(groups=groups)
         self._best_splits = self._get_split_indices()
         groups = self._regroup(groups)
         for i in range(self.n_splits):
@@ -560,9 +744,7 @@ class GroupTimeSeriesSplit(_BaseKFold):
         )
 
         # set the ideal group_size and reduce it to 90% to have some leverage
-        self._ideal_group_size = np.sum(self._grouped_df["observations"]) / (
-            self.n_splits + 1
-        )
+        self._ideal_group_size = np.sum(self._grouped_df["observations"]) / (self.n_splits + 1)
         init_ideal_group_size = self._ideal_group_size * 0.9
 
         # initialize the index of the first split, to reduce the amount of possible index split options
@@ -577,7 +759,7 @@ class GroupTimeSeriesSplit(_BaseKFold):
         # initialize the index of the last split point, to reduce the amount of possible index split options
         last_split_index = len(self._grouped_df) - (
             self._grouped_df.assign(
-                observations=lambda df: df["observations"].values[::-1],
+                observations=lambda df: df["observations"].to_numpy()[::-1],
                 cumsum_obs=lambda df: df["observations"].cumsum(),
             )
             .reset_index()
@@ -622,18 +804,12 @@ class GroupTimeSeriesSplit(_BaseKFold):
         # ideal_group_size = 100
         # group_sizes = [10,20,270]
         # diff_from_ideal_list = [-90, -80, 170]
-        diff_from_ideal_list = [
-            sum(observations[: first_splits[0]]) - self._ideal_group_size
-        ]
+        diff_from_ideal_list = [sum(observations[: first_splits[0]]) - self._ideal_group_size]
         for split in sliding_window(first_splits, window_size=2, step_size=1):
             try:
-                diff_from_ideal_list += [
-                    sum(observations[split[0] : split[1]]) - self._ideal_group_size
-                ]
+                diff_from_ideal_list += [sum(observations[split[0] : split[1]]) - self._ideal_group_size]
             except IndexError:
-                diff_from_ideal_list += [
-                    sum(observations[split[0] :]) - self._ideal_group_size
-                ]
+                diff_from_ideal_list += [sum(observations[split[0] :]) - self._ideal_group_size]
 
         # keep track of the minimum of the total difference from all groups to the ideal group size
         min_diff = sum([abs(diff) for diff in diff_from_ideal_list])
@@ -642,9 +818,7 @@ class GroupTimeSeriesSplit(_BaseKFold):
         # loop through all possible split points and check whether a new split
         # has a less total difference from all groups to the ideal group size
         for prev_splits, new_splits in zip(splits_generator, splits_generator_shifted):
-            diff_from_ideal_list = self._calc_new_diffs(
-                observations, diff_from_ideal_list, prev_splits, new_splits
-            )
+            diff_from_ideal_list = self._calc_new_diffs(observations, diff_from_ideal_list, prev_splits, new_splits)
             new_diff = sum([abs(diff) for diff in diff_from_ideal_list])
 
             # if with the new split the difference is less than the current most optimal, save the new split
@@ -677,10 +851,7 @@ class GroupTimeSeriesSplit(_BaseKFold):
         # new_index = (1,2,5)
         # prev_index = (1,2,4)
         # index_diffs = (0,0,1)
-        index_diffs = [
-            new_index - prev_index
-            for prev_index, new_index in zip(prev_splits, new_splits)
-        ]
+        index_diffs = [new_index - prev_index for prev_index, new_index in zip(prev_splits, new_splits)]
         new_diff_list = diff_list.copy()
 
         # calculate the effects of the index change to the groups

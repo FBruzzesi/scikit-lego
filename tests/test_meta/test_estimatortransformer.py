@@ -1,27 +1,24 @@
-import pytest
+from unittest.mock import Mock, patch
+
 import numpy as np
-from unittest.mock import Mock
-from unittest.mock import patch
+import pytest
 from sklearn import clone
 from sklearn.dummy import DummyClassifier
 from sklearn.ensemble import HistGradientBoostingClassifier
-from sklearn.multioutput import MultiOutputRegressor
+from sklearn.exceptions import NotFittedError
 from sklearn.linear_model import LinearRegression, Ridge
-from sklearn.pipeline import Pipeline, FeatureUnion
+from sklearn.multioutput import MultiOutputRegressor
+from sklearn.pipeline import FeatureUnion, Pipeline
 from sklearn.preprocessing import OrdinalEncoder
 from sklearn.utils import check_X_y
+from sklearn.utils.estimator_checks import parametrize_with_checks
 
-from sklego.common import flatten
 from sklego.meta import EstimatorTransformer
-from tests.conftest import transformer_checks, general_checks
 
 
-@pytest.mark.parametrize(
-    "test_fn", flatten([transformer_checks, general_checks])
-)
-def test_estimator_checks(test_fn):
-    trf = EstimatorTransformer(LinearRegression(), check_input=True)
-    test_fn(EstimatorTransformer.__name__, trf)
+@parametrize_with_checks([EstimatorTransformer(LinearRegression(), check_input=True)])
+def test_sklearn_compatible_estimator(estimator, check):
+    check(estimator)
 
 
 def test_values_uniform(random_xy_dataset_clf):
@@ -81,20 +78,13 @@ def test_shape_multitarget(random_xy_dataset_multitarget):
     X, y = random_xy_dataset_multitarget
     m = X.shape[0]
     n = y.shape[1]
-    pipeline = Pipeline(
-        [
-            (
-                "multi_ml_features",
-                EstimatorTransformer(MultiOutputRegressor(Ridge()))
-            )
-        ]
-    )
+    pipeline = Pipeline([("multi_ml_features", EstimatorTransformer(MultiOutputRegressor(Ridge())))])
     assert pipeline.fit(X, y).transform(X).shape == (m, n)
 
 
-@patch('sklego.meta.estimator_transformer.clone')
+@patch("sklego.meta.estimator_transformer.clone")
 def test_kwargs(patched_clone, random_xy_dataset_clf):
-    """ Test if kwargs are properly passed to an underlying estimator. """
+    """Test if kwargs are properly passed to an underlying estimator."""
     X, y = random_xy_dataset_clf
     estimator = Mock()
     patched_clone.return_value = estimator
@@ -105,32 +95,64 @@ def test_kwargs(patched_clone, random_xy_dataset_clf):
 
     # We can't use `assert_called_with` because that compares by `==` which is ambiguous
     # on numpy arrays
-    np.testing.assert_array_equal(
-        X, estimator.fit.call_args[0][0]
-    )
-    np.testing.assert_array_equal(
-        y, estimator.fit.call_args[0][1]
-    )
-    np.testing.assert_array_equal(
-        sample_weights, estimator.fit.call_args[1]['sample_weight']
-    )
+    np.testing.assert_array_equal(X, estimator.fit.call_args[0][0])
+    np.testing.assert_array_equal(y, estimator.fit.call_args[0][1])
+    np.testing.assert_array_equal(sample_weights, estimator.fit.call_args[1]["sample_weight"])
 
 
 @pytest.mark.parametrize(
-    "X", [np.array([[np.nan, 4], [7, 3], [5, 5], [7, 2], [5, 7]]),
-          np.array([["a", 4], ["a", 3], ["b", 5], ["b", 2], ["b", 7]])]
+    "X",
+    [
+        np.array([[np.nan, 4], [7, 3], [5, 5], [7, 2], [5, 7]]),
+        np.array([["a", 4], ["a", 3], ["b", 5], ["b", 2], ["b", 7]]),
+    ],
 )
 def test_nan_and_string_input(X):
-    """ Test X containing nan and string with check_input=False. """
+    """Test X containing nan and string with check_input=False."""
     y = np.array([1, 0, 1, 0, 1])
-    clf = Pipeline(
-        [
-            ("encoder", OrdinalEncoder()),
-            ("gbm", HistGradientBoostingClassifier())
-        ]
-    )
+    clf = Pipeline([("encoder", OrdinalEncoder()), ("gbm", HistGradientBoostingClassifier())])
     transformer = EstimatorTransformer(clf, check_input=False)
     transformed = transformer.fit(X, y).transform(X)
 
     assert transformed.shape == (y.shape[0], 1)
     assert np.all(transformed == clf.fit(X, y).predict(X))
+
+
+def test_get_feature_names_out(random_xy_dataset_regr):
+    """`get_feature_names_out` should exist and match the width of `transform`."""
+    X, y = random_xy_dataset_regr
+    X, y = check_X_y(X, y, estimator=EstimatorTransformer(LinearRegression()), dtype="numeric")
+
+    transformer = EstimatorTransformer(LinearRegression()).fit(X, y)
+    names = transformer.get_feature_names_out()
+
+    assert list(names) == ["estimatortransformer0"]
+    assert len(names) == transformer.transform(X).shape[1]
+
+
+def test_get_feature_names_out_multitarget(random_xy_dataset_multitarget):
+    """One name per target column for a multi output estimator."""
+    X, y = random_xy_dataset_multitarget
+    X, y = check_X_y(X, y, estimator=EstimatorTransformer(LinearRegression()), dtype="numeric", multi_output=True)
+
+    transformer = EstimatorTransformer(LinearRegression()).fit(X, y)
+    names = transformer.get_feature_names_out()
+
+    assert len(names) == y.shape[1]
+    assert len(names) == transformer.transform(X).shape[1]
+
+
+def test_get_feature_names_out_in_pipeline(random_xy_dataset_regr):
+    """The names must also resolve through a pipeline (the reported symptom)."""
+    X, y = random_xy_dataset_regr
+    X, y = check_X_y(X, y, estimator=EstimatorTransformer(LinearRegression()), dtype="numeric")
+
+    pipeline = Pipeline([("clf", EstimatorTransformer(LinearRegression()))]).fit(X, y)
+
+    assert list(pipeline.get_feature_names_out()) == ["estimatortransformer0"]
+
+
+def test_get_feature_names_out_not_fitted():
+    """Asking before fit raises NotFittedError rather than AttributeError."""
+    with pytest.raises(NotFittedError):
+        EstimatorTransformer(LinearRegression()).get_feature_names_out()

@@ -3,12 +3,12 @@ from warnings import warn
 import numpy as np
 from sklearn.base import BaseEstimator, ClassifierMixin
 from sklearn.mixture import BayesianGaussianMixture, GaussianMixture
-from sklearn.utils import check_X_y
 from sklearn.utils.multiclass import unique_labels
-from sklearn.utils.validation import FLOAT_DTYPES, check_array, check_is_fitted
+from sklearn.utils.validation import FLOAT_DTYPES, check_is_fitted
+from sklearn_compat.utils.validation import validate_data
 
 
-class GaussianMixtureNB(BaseEstimator, ClassifierMixin):
+class GaussianMixtureNB(ClassifierMixin, BaseEstimator):
     """The `GaussianMixtureNB` estimator is a naive bayes classifier that uses a mixture of gaussians instead of
     merely a single one. In particular it trains a `GaussianMixture` model for each class in the target and for each
     feature in the data, on the subset of `X` where `y == class`.
@@ -73,7 +73,7 @@ class GaussianMixtureNB(BaseEstimator, ClassifierMixin):
         self : GaussianMixtureNB
             The fitted estimator.
         """
-        X, y = check_X_y(X, y, estimator=self, dtype=FLOAT_DTYPES)
+        X, y = validate_data(self, X=X, y=y, dtype=FLOAT_DTYPES, reset=True)
         if X.ndim == 1:
             X = np.expand_dims(X, 1)
 
@@ -99,6 +99,7 @@ class GaussianMixtureNB(BaseEstimator, ClassifierMixin):
                 ).fit(subset_x[:, i].reshape(-1, 1), subset_y)
                 for i in range(X.shape[1])
             ]
+        self.n_iter_ = sum(sum(gmm.n_iter_ for gmm in gmm_c) for gmm_c in self.gmms_.values())
         return self
 
     def predict(self, X):
@@ -116,7 +117,10 @@ class GaussianMixtureNB(BaseEstimator, ClassifierMixin):
             The predicted data.
         """
         check_is_fitted(self, ["gmms_", "classes_", "n_features_in_"])
-        X = check_array(X, estimator=self, dtype=FLOAT_DTYPES)
+        X = validate_data(self, X=X, dtype=FLOAT_DTYPES, reset=False)
+        # if self.n_features_in_ != X.shape[1]:
+        #     raise ValueError(f"number of columns {X.shape[1]} does not match fit size {self.n_features_in_}")
+
         return self.classes_[self.predict_proba(X).argmax(axis=1)]
 
     def predict_proba(self, X: np.ndarray):
@@ -134,20 +138,13 @@ class GaussianMixtureNB(BaseEstimator, ClassifierMixin):
             The predicted probabilities.
         """
         check_is_fitted(self, ["gmms_", "classes_", "n_features_in_"])
-        X = check_array(X, estimator=self, dtype=FLOAT_DTYPES)
-        if self.n_features_in_ != X.shape[1]:
-            raise ValueError(
-                f"number of columns {X.shape[1]} does not match fit size {self.n_features_in_}"
-            )
-        check_is_fitted(self, ["gmms_", "classes_"])
+        X = validate_data(self, X=X, dtype=FLOAT_DTYPES, reset=False)
+
         probs = np.zeros((X.shape[0], len(self.classes_)))
         for k, v in self.gmms_.items():
-            class_idx = int(np.argwhere(self.classes_ == k))
+            class_idx = np.argmax(self.classes_ == k)
             probs[:, class_idx] = np.array(
-                [
-                    m.score_samples(np.expand_dims(X[:, idx], 1))
-                    for idx, m in enumerate(v)
-                ]
+                [m.score_samples(np.expand_dims(X[:, idx], 1)) for idx, m in enumerate(v)]
             ).sum(axis=0)
         likelihood = np.exp(probs)
         return likelihood / likelihood.sum(axis=1).reshape(-1, 1)
@@ -162,7 +159,7 @@ class GaussianMixtureNB(BaseEstimator, ClassifierMixin):
         return self.n_features_in_
 
 
-class BayesianGaussianMixtureNB(BaseEstimator, ClassifierMixin):
+class BayesianGaussianMixtureNB(ClassifierMixin, BaseEstimator):
     """The `BayesianGaussianMixtureNB` estimator is a naive bayes classifier that uses a bayesian mixture of gaussians
     instead of merely a single one. In particular it trains a `BayesianGaussianMixture` model for each class in the
     target and for each feature in the data, on the subset of `X` where `y == class`.
@@ -238,7 +235,7 @@ class BayesianGaussianMixtureNB(BaseEstimator, ClassifierMixin):
         self : BayesianGaussianMixtureNB
             The fitted estimator.
         """
-        X, y = check_X_y(X, y, estimator=self, dtype=FLOAT_DTYPES)
+        X, y = validate_data(self, X=X, y=y, dtype=FLOAT_DTYPES, reset=True)
         if X.ndim == 1:
             X = np.expand_dims(X, 1)
 
@@ -269,6 +266,7 @@ class BayesianGaussianMixtureNB(BaseEstimator, ClassifierMixin):
                 ).fit(subset_x[:, i].reshape(-1, 1), subset_y)
                 for i in range(X.shape[1])
             ]
+        self.n_iter_ = sum(sum(gmm.n_iter_ for gmm in gmm_c) for gmm_c in self.gmms_.values())
         return self
 
     def predict(self, X):
@@ -286,7 +284,8 @@ class BayesianGaussianMixtureNB(BaseEstimator, ClassifierMixin):
             The predicted data.
         """
         check_is_fitted(self, ["gmms_", "classes_", "n_features_in_"])
-        X = check_array(X, estimator=self, dtype=FLOAT_DTYPES)
+        X = validate_data(self, X=X, dtype=FLOAT_DTYPES, reset=False)
+
         return self.classes_[self.predict_proba(X).argmax(axis=1)]
 
     def predict_proba(self, X: np.ndarray):
@@ -304,20 +303,13 @@ class BayesianGaussianMixtureNB(BaseEstimator, ClassifierMixin):
             The predicted probabilities.
         """
         check_is_fitted(self, ["gmms_", "classes_", "n_features_in_"])
-        X = check_array(X, estimator=self, dtype=FLOAT_DTYPES)
-        if self.n_features_in_ != X.shape[1]:
-            raise ValueError(
-                f"number of columns {X.shape[1]} does not match fit size {self.n_features_in_}"
-            )
-        check_is_fitted(self, ["gmms_", "classes_"])
+        X = validate_data(self, X=X, dtype=FLOAT_DTYPES, reset=False)
+
         probs = np.zeros((X.shape[0], len(self.classes_)))
         for k, v in self.gmms_.items():
-            class_idx = int(np.argwhere(self.classes_ == k))
+            class_idx = np.argmax(self.classes_ == k)
             probs[:, class_idx] = np.array(
-                [
-                    m.score_samples(np.expand_dims(X[:, idx], 1))
-                    for idx, m in enumerate(v)
-                ]
+                [m.score_samples(np.expand_dims(X[:, idx], 1)) for idx, m in enumerate(v)]
             ).sum(axis=0)
         likelihood = np.exp(probs)
         return likelihood / likelihood.sum(axis=1).reshape(-1, 1)

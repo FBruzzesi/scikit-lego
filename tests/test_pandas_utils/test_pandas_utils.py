@@ -1,22 +1,25 @@
-import pytest
-import pandas as pd
-import numpy as np
 import logging
 
+import narwhals.stable.v1 as nw
+import numpy as np
+import pandas as pd
+import polars as pl
+import pytest
+
 from sklego.pandas_utils import (
+    _add_lagged_dataframe_columns,
+    _add_lagged_numpy_columns,
+    add_lags,
     log_step,
     log_step_extra,
-    add_lags,
-    _add_lagged_pandas_columns,
-    _add_lagged_numpy_columns,
 )
 
 logging.basicConfig(level=logging.INFO)
 
 
 @pytest.fixture
-def test_df():
-    return pd.DataFrame({"X1": [0, 1, 2], "X2": [np.nan, "178", "154"]})
+def data():
+    return {"X1": [0, 1, 2], "X2": [float("nan"), "178", "154"]}
 
 
 @pytest.fixture
@@ -24,20 +27,32 @@ def test_X():
     return np.array([[-4, 2], [-2, 0], [4, -6]])
 
 
-def test_add_lags_wrong_inputs(test_df):
+@pytest.mark.parametrize("frame_func", [pd.DataFrame, lambda data: pl.DataFrame(data, strict=False)])
+def test_add_lags_wrong_inputs(data, frame_func):
     invalid_df = [[1, 2, 3], [4, 5, 6]]
     invalid_lags = ["1", "2"]
+    test_df = frame_func(data)
     with pytest.raises(ValueError, match="lags must be a list of type: ?"):
         add_lags(test_df, ["X1"], invalid_lags)
     with pytest.raises(ValueError, match="X type should be one of: ?"):
         add_lags(invalid_df, ["X1"], 1)
 
 
-def test_add_lags_correct_df(test_df):
-    expected = pd.DataFrame({"X1": [1, 2], "X2": ["178", "154"], "X1-1": [0, 1]})
+@pytest.mark.parametrize(
+    "frame_func",
+    [pd.DataFrame, lambda data: pl.DataFrame(data, strict=False), lambda data: pl.LazyFrame(data, strict=False)],
+)
+def test_add_lags_correct_df(data, frame_func):
+    test_df = frame_func(data)
+    expected = frame_func({"X1": [1, 2], "X2": ["178", "154"], "X1-1": [0, 1]})
     ans = add_lags(test_df, "X1", -1)
-    assert (ans.columns == expected.columns).all()
-    assert (ans.values == expected.values).all()
+    if isinstance(ans, pl.LazyFrame):
+        ans = ans.collect()
+    if isinstance(expected, pl.LazyFrame):
+        expected = expected.collect()
+    assert [x for x in ans.columns] == [x for x in expected.columns]
+
+    assert (ans.to_numpy() == expected.to_numpy()).all()
 
 
 def test_add_lags_correct_X(test_X):
@@ -45,9 +60,11 @@ def test_add_lags_correct_X(test_X):
     assert (add_lags(test_X, [0, 1], [1, 2]) == expected).all()
 
 
-def test_add_lagged_pandas_columns(test_df):
+@pytest.mark.parametrize("frame_func", [pd.DataFrame, lambda data: pl.DataFrame(data, strict=False)])
+def test_add_lagged_dataframe_columns(data, frame_func):
+    test_df = nw.from_native(frame_func(data))
     with pytest.raises(KeyError, match="The column does not exist"):
-        _add_lagged_pandas_columns(test_df, ["last_name"], 1, True)
+        _add_lagged_dataframe_columns(test_df, ["last_name"], 1, True)
 
 
 def test_add_lagged_numpy_columns(test_X):
@@ -61,8 +78,9 @@ def test_add_lagged_numpy_columns(test_X):
         _add_lagged_numpy_columns(test_X, ["test"], 1, True)
 
 
-def test_log_step(capsys, test_df):
+def test_log_step(capsys, data):
     """Base test of log_step without any arguments to the logger"""
+    test_df = pd.DataFrame(data)
 
     @log_step
     def do_something(df):
@@ -76,13 +94,15 @@ def test_log_step(capsys, test_df):
 
     captured = capsys.readouterr()
     print_statements = captured.out.split("\n")
-    
+
     assert print_statements[0].startswith("[do_nothing(df)]")
     assert print_statements[1].startswith("[do_nothing(df, kwargs = {'a': '1'})]")
     assert print_statements[2].startswith("[do_something(df)]")
 
-def test_log_step_display_args(capsys, test_df):
+
+def test_log_step_display_args(capsys, data):
     """Test that we can disable printing function arguments in the log_step"""
+    test_df = pd.DataFrame(data)
 
     @log_step(display_args=False)
     def do_something(df):
@@ -102,8 +122,9 @@ def test_log_step_display_args(capsys, test_df):
     assert print_statements[2].startswith("[do_something]")
 
 
-def test_log_step_logger(caplog, test_df):
+def test_log_step_logger(caplog, data):
     """Base test of log_step with a logger supplied instead of default print"""
+    test_df = pd.DataFrame(data)
     caplog.clear()
 
     @log_step(print_fn=logging.info)
@@ -113,18 +134,19 @@ def test_log_step_logger(caplog, test_df):
     @log_step(print_fn=logging.info)
     def do_nothing(df, *args, **kwargs):
         return df
-    
+
     with caplog.at_level(logging.INFO):
         (test_df.pipe(do_nothing).pipe(do_nothing, a="1").pipe(do_something))
-    
+
     assert caplog.messages[0].startswith("[do_nothing(df)]")
     assert caplog.messages[1].startswith("[do_nothing(df, kwargs = {'a': '1'})]")
     assert caplog.messages[2].startswith("[do_something(df)]")
 
 
 @pytest.mark.parametrize("time_taken", [True, False])
-def test_log_time(time_taken, capsys, test_df):
+def test_log_time(time_taken, capsys, data):
     """Test logging of time taken can be switched on and off"""
+    test_df = pd.DataFrame(data)
 
     @log_step(time_taken=time_taken)
     def do_nothing(df, *args, **kwargs):
@@ -139,8 +161,9 @@ def test_log_time(time_taken, capsys, test_df):
 
 
 @pytest.mark.parametrize("shape", [True, False])
-def test_log_shape(shape, capsys, test_df):
+def test_log_shape(shape, capsys, data):
     """Test logging of shape can be switched on and off"""
+    test_df = pd.DataFrame(data)
 
     @log_step(shape=shape)
     def do_nothing(df, *args, **kwargs):
@@ -154,8 +177,9 @@ def test_log_shape(shape, capsys, test_df):
     assert (f"n_col={test_df.shape[1]}" in captured.out) == shape
 
 
-def test_log_shape_delta(capsys, test_df):
+def test_log_shape_delta(capsys, data):
     """Test logging of shape delta can be switched on and off"""
+    test_df = pd.DataFrame(data)
 
     @log_step(shape_delta=True)
     def do_nothing(df, *args, **kwargs):
@@ -179,13 +203,7 @@ def test_log_shape_delta(capsys, test_df):
     def remove_column(df, *args, **kwargs):
         return df.drop(columns="new_column")
 
-    (
-        test_df.pipe(do_nothing)
-        .pipe(add_row)
-        .pipe(remove_row)
-        .pipe(add_column)
-        .pipe(remove_column)
-    )
+    (test_df.pipe(do_nothing).pipe(add_row).pipe(remove_row).pipe(add_column).pipe(remove_column))
 
     captured = capsys.readouterr()
     print_statements = captured.out.split("\n")
@@ -198,8 +216,9 @@ def test_log_shape_delta(capsys, test_df):
 
 
 @pytest.mark.parametrize("names", [True, False])
-def test_log_names(names, capsys, test_df):
+def test_log_names(names, capsys, data):
     """Test logging of names can be switched on and off"""
+    test_df = pd.DataFrame(data)
 
     @log_step(names=names)
     def do_nothing(df, *args, **kwargs):
@@ -216,8 +235,9 @@ def test_log_names(names, capsys, test_df):
 
 
 @pytest.mark.parametrize("dtypes", [True, False])
-def test_log_dtypes(dtypes, capsys, test_df):
+def test_log_dtypes(dtypes, capsys, data):
     """Test logging of dtypes can be switched on and off"""
+    test_df = pd.DataFrame(data)
 
     @log_step(dtypes=dtypes)
     def do_nothing(df, *args, **kwargs):
@@ -233,11 +253,12 @@ def test_log_dtypes(dtypes, capsys, test_df):
         assert str(test_df.dtypes.to_dict()) in captured.out
 
 
-def test_log_not_names_and_dtypes(capsys, test_df):
+def test_log_not_names_and_dtypes(capsys, data):
     """
     Test that not both names and types are logged, even if we set both to True
     We don't want this because dtypes also prints the names
     """
+    test_df = pd.DataFrame(data)
 
     @log_step(names=True, dtypes=True)
     def do_nothing(df, *args, **kwargs):
@@ -250,8 +271,9 @@ def test_log_not_names_and_dtypes(capsys, test_df):
     assert "names=" not in captured.out
 
 
-def test_log_custom_logger(caplog, test_df):
+def test_log_custom_logger(caplog, data):
     """Test that we can supply a custom logger to the log_step"""
+    test_df = pd.DataFrame(data)
     caplog.clear()
 
     logger_name = "my_custom_logger"
@@ -269,8 +291,9 @@ def test_log_custom_logger(caplog, test_df):
 
 
 @pytest.mark.parametrize("log_error", [True, False])
-def test_log_error(log_error, capsys, test_df):
+def test_log_error(log_error, capsys, data):
     """Test logging of shape can be switched on and off"""
+    test_df = pd.DataFrame(data)
 
     err_msg = "This is a test Exception"
 
@@ -296,12 +319,10 @@ def test_log_extra(capsys):
     n_cats = 3
     n_dogs = 2
 
-    test_df = pd.DataFrame(
-        {"id": range(n_cats + n_dogs), "animals": ["dog"] * n_dogs + ["cat"] * n_cats}
-    )
+    test_df = pd.DataFrame({"id": range(n_cats + n_dogs), "animals": ["dog"] * n_dogs + ["cat"] * n_cats})
 
     def cat_counter(df):
-        return f"cats={(df['animals']=='cat').sum()}"
+        return f"cats={(df['animals'] == 'cat').sum()}"
 
     @log_step_extra(cat_counter)
     def do_nothing(df, *args, **kwargs):
@@ -317,7 +338,7 @@ def test_log_extra(capsys):
     print_statements = captured.out.split("\n")
 
     assert f"cats={n_cats}" in print_statements[0]
-    assert f"cats={2*n_cats}" in print_statements[1]
+    assert f"cats={2 * n_cats}" in print_statements[1]
 
 
 def test_log_extra_kwargs(capsys):
@@ -325,12 +346,10 @@ def test_log_extra_kwargs(capsys):
     n_cats = 3
     n_dogs = 2
 
-    test_df = pd.DataFrame(
-        {"id": range(n_cats + n_dogs), "animals": ["dog"] * n_dogs + ["cat"] * n_cats}
-    )
+    test_df = pd.DataFrame({"id": range(n_cats + n_dogs), "animals": ["dog"] * n_dogs + ["cat"] * n_cats})
 
     def animal_counter(df, animal="cat"):
-        return f"{animal}s={(df['animals']==animal).sum()}"
+        return f"{animal}s={(df['animals'] == animal).sum()}"
 
     @log_step_extra(animal_counter, animal="dog")
     def do_nothing(df, *args, **kwargs):
@@ -346,11 +365,12 @@ def test_log_extra_kwargs(capsys):
     print_statements = captured.out.split("\n")
 
     assert f"dogs={n_dogs}" in print_statements[0]
-    assert f"dogs={2*n_dogs}" in print_statements[1]
+    assert f"dogs={2 * n_dogs}" in print_statements[1]
 
 
-def test_log_extra_multiple(capsys, test_df):
+def test_log_extra_multiple(capsys, data):
     """Test that we can add multiple logging functions"""
+    test_df = pd.DataFrame(data)
 
     @log_step_extra(len, type)
     def do_nothing(df, *args, **kwargs):
@@ -364,8 +384,9 @@ def test_log_extra_multiple(capsys, test_df):
     assert str(type(test_df)) in captured.out
 
 
-def test_log_extra_no_func(test_df):
+def test_log_extra_no_func(data):
     """We need at least one logging function"""
+    test_df = pd.DataFrame(data)
     with pytest.raises(ValueError) as e:
 
         @log_step_extra()
@@ -377,8 +398,9 @@ def test_log_extra_no_func(test_df):
         assert "log_function" in str(e)
 
 
-def test_log_extra_not_callable_func(test_df):
+def test_log_extra_not_callable_func(data):
     """Make sure the logging functions are checked to be callable"""
+    test_df = pd.DataFrame(data)
     with pytest.raises(ValueError) as e:
 
         @log_step_extra(1)
@@ -391,8 +413,9 @@ def test_log_extra_not_callable_func(test_df):
         assert "int" in str(e)
 
 
-def test_log_extra_custom_logger(caplog, test_df):
+def test_log_extra_custom_logger(caplog, data):
     """Test that we can supply a custom logger to the log_step_extra"""
+    test_df = pd.DataFrame(data)
     caplog.clear()
 
     logger_name = "my_custom_logger"

@@ -1,9 +1,8 @@
 import types
-
-import pandas as pd
 import warnings
 
 import numpy as np
+import pandas as pd
 from sklearn.linear_model import LogisticRegression
 from sklearn.pipeline import make_pipeline
 
@@ -55,28 +54,20 @@ def test_p_percent_pandas_multiclass():
 
     mod_1.predict = lambda X: np.array([2, 0, 1, 0, 1, 0, 1, 2])
     assert (
-        equal_opportunity_score(sensitive_column="x2", positive_target=2)(
-            mod_1, X, np.array([2, 0, 1, 0, 1, 0, 1, 2])
-        )
+        equal_opportunity_score(sensitive_column="x2", positive_target=2)(mod_1, X, np.array([2, 0, 1, 0, 1, 0, 1, 2]))
         == 1
     )
 
     mod_1.predict = lambda X: np.array([1, 0, 1, 0, 1, 0, 0, 1])
-    assert (
-        equal_opportunity_score(sensitive_column="x2", positive_target=2)(mod_1, X, y)
-        == 0
-    )
+    assert equal_opportunity_score(sensitive_column="x2", positive_target=2)(mod_1, X, y) == 0
 
     mod_1.predict = lambda X: np.array([1, 0, 1, 0, 1, 0, 0, 0])
-    assert (
-        equal_opportunity_score(sensitive_column="x2", positive_target=2)(mod_1, X, y)
-        == 0
-    )
+    assert equal_opportunity_score(sensitive_column="x2", positive_target=2)(mod_1, X, y) == 0
 
 
 def test_p_percent_numpy(sensitive_classification_dataset):
     X, y = sensitive_classification_dataset
-    X = X.values
+    X, y = X.to_numpy(), y.to_numpy()
     mod = LogisticRegression().fit(X, y)
     assert equal_opportunity_score(1)(mod, X, y) == 0
 
@@ -90,3 +81,4 @@ def test_warning_is_logged(sensitive_classification_dataset):
         # Trigger a warning.
         equal_opportunity_score("x2", positive_target=2)(mod_fair, X, y)
         assert issubclass(w[-1].category, RuntimeWarning)
+        assert "y_true == 2 and y_hat == 2" in str(w[-1].message)

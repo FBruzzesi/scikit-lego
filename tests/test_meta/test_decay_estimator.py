@@ -1,30 +1,29 @@
-import pytest
 import numpy as np
+import pytest
+from sklearn.base import is_classifier, is_regressor
+from sklearn.linear_model import LinearRegression, LogisticRegression, Ridge
 from sklearn.neighbors import KNeighborsClassifier
-from sklearn.linear_model import LinearRegression, Ridge, LogisticRegression
 from sklearn.tree import DecisionTreeClassifier, DecisionTreeRegressor
-from sklearn.base import is_regressor, is_classifier
+from sklearn.utils.estimator_checks import parametrize_with_checks
+from sklearn_compat.utils import get_tags
 
-
-from sklego.common import flatten
 from sklego.meta import DecayEstimator
-from tests.conftest import (
-    general_checks,
-    classifier_checks,
-    regressor_checks,
+
+
+@parametrize_with_checks(
+    [
+        DecayEstimator(LinearRegression(), check_input=True, decay_func=decay_func)
+        for decay_func in ("linear", "exponential", "sigmoid")
+    ]
 )
+def test_sklearn_compatible_estimator(estimator, check):
+    if check.func.__name__ in {
+        "check_no_attributes_set_in_init",  # Setting **kwargs in init
+        "check_regressor_multioutput",  # incompatible between pre and post 1.6
+    }:
+        pytest.skip()
 
-
-@pytest.mark.parametrize("test_fn", flatten([general_checks, regressor_checks]))
-def test_estimator_checks_regression(test_fn):
-    trf = DecayEstimator(LinearRegression(), check_input=True)
-    test_fn(DecayEstimator.__name__, trf)
-
-
-@pytest.mark.parametrize("test_fn", flatten([general_checks, classifier_checks]))
-def test_estimator_checks_classification(test_fn):
-    trf = DecayEstimator(LogisticRegression(solver="lbfgs"), check_input=True)
-    test_fn(DecayEstimator.__name__, trf)
+    check(estimator)
 
 
 @pytest.mark.parametrize(
@@ -35,7 +34,7 @@ def test_estimator_checks_classification(test_fn):
         (DecisionTreeRegressor(), False),
         (DecisionTreeClassifier(), True),
         (LogisticRegression(solver="lbfgs"), True),
-    ]
+    ],
 )
 @pytest.mark.parametrize(
     "decay_func, decay_kwargs",
@@ -48,7 +47,7 @@ def test_estimator_checks_classification(test_fn):
         ("sigmoid", {"growth_rate": None}),
         ("stepwise", {"n_steps": 10}),
         ("stepwise", {"step_size": 2}),
-    ]
+    ],
 )
 def test_decay_weight(mod, is_clf, decay_func, decay_kwargs):
     X, y = np.random.normal(0, 1, (100, 100)), np.random.normal(0, 1, (100,))
@@ -56,13 +55,13 @@ def test_decay_weight(mod, is_clf, decay_func, decay_kwargs):
     if is_clf:
         y = (y < 0).astype(int)
 
-    mod = DecayEstimator(mod, decay_func=decay_func, **decay_kwargs).fit(X, y)
+    mod = DecayEstimator(mod, decay_func=decay_func, decay_kwargs=decay_kwargs).fit(X, y)
 
     assert np.logical_and(mod.weights_ >= 0, mod.weights_ <= 1).all()
     assert np.all(mod.weights_[:-1] <= mod.weights_[1:])
 
 
-@pytest.mark.parametrize("mod", flatten([KNeighborsClassifier()]))
+@pytest.mark.parametrize("mod", [KNeighborsClassifier()])
 def test_throw_warning(mod):
     X, y = np.random.normal(0, 1, (100, 100)), np.random.normal(0, 1, (100,)) < 0
     with pytest.raises(TypeError) as e:
@@ -83,6 +82,6 @@ def test_throw_warning(mod):
 )
 def test_estimator_type_regressor(mod, is_regr):
     mod = DecayEstimator(mod)
-    assert mod._estimator_type == mod.model._estimator_type
+    assert mod._estimator_type == get_tags(mod.model).estimator_type
     assert is_regressor(mod) == is_regr
     assert is_classifier(mod) == (not is_regr)

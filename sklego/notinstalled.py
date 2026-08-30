@@ -2,7 +2,6 @@ KNOWN_PACKAGES = {
     "cvxpy": {"version": ">=1.0.24", "extra_name": "cvxpy"},
     "umap-learn": {"version": ">=0.4.6", "extra_name": "umap"},
     "formulaic": {"version": ">=0.6.0", "extra_name": "formulaic"},
-    "patsy": {"version": ">=0.5.1", "extra_name": "patsy"},
 }
 
 
@@ -46,7 +45,4 @@ class NotInstalledPackage:
         )
 
     def __getattr__(self, name):
-        raise ImportError(
-            f"The package {self.package_name}{self.version} is not installed. "
-            + self.pip_message
-        )
+        raise ImportError(f"The package {self.package_name}{self.version} is not installed. " + self.pip_message)

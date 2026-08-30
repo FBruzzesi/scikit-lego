@@ -109,9 +109,7 @@ ggplot(data=cv_df) +
   theme(legend.position="bottom")
 ```
 
-<p align="center">
-  <img src="/_static/rstudio/Rplot1.png" />
-</p>
+![rplot1](_static/rstudio/Rplot1.png)
 
 ```r
 ggplot(data=cv_df) +
@@ -122,9 +120,7 @@ ggplot(data=cv_df) +
   theme(legend.position="bottom")
 ```
 
-<p align="center">
-  <img src="/_static/rstudio/Rplot2.png" />
-</p>
+![rplot2](_static/rstudio/Rplot2.png)
 
 ## Important
 
@@ -135,8 +131,8 @@ Also, it may be simpler and more preferential to use the [python engine][python-
 
 But you can certainly combine the tools from scikit-lego with your tools in R.
 
-[info-filter-api]: /api/preprocessing#sklego.preprocessing.InformationFilter
-[thresholder-api]: /api/meta/#sklego.meta.thresholder.Thresholder
+[info-filter-api]: ../api/preprocessing#sklego.preprocessing.InformationFilter
+[thresholder-api]: ../api/meta#sklego.meta.thresholder.Thresholder
 
 [reticulate]: https://github.com/rstudio/reticulate
 [reticulate-install]: https://rstudio.github.io/reticulate/articles/versions.html

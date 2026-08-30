@@ -1,10 +1,15 @@
 from sklearn import clone
-from sklearn.base import BaseEstimator, MetaEstimatorMixin, TransformerMixin
-from sklearn.utils.validation import FLOAT_DTYPES, check_is_fitted, check_X_y
+from sklearn.base import (
+    BaseEstimator,
+    ClassNamePrefixFeaturesOutMixin,
+    MetaEstimatorMixin,
+    TransformerMixin,
+)
+from sklearn.utils.validation import FLOAT_DTYPES, check_is_fitted
+from sklearn_compat.utils.validation import _check_n_features, validate_data
 
 
-
-class EstimatorTransformer(TransformerMixin, MetaEstimatorMixin, BaseEstimator):
+class EstimatorTransformer(ClassNamePrefixFeaturesOutMixin, TransformerMixin, MetaEstimatorMixin, BaseEstimator):
     """Allow using an estimator as a transformer in an earlier step of a pipeline.
 
     !!! warning
@@ -27,7 +32,37 @@ class EstimatorTransformer(TransformerMixin, MetaEstimatorMixin, BaseEstimator):
         The fitted underlying estimator.
     multi_output_ : bool
         Whether or not the estimator is multi output.
+
+    Example
+    -------
+    ```py
+    import numpy as np
+    from sklearn.linear_model import LogisticRegression
+    from sklego.meta import EstimatorTransformer
+
+    np.random.seed(0)
+    n1, n2 = 50, 100
+    X = np.concatenate([np.random.normal(0, 1, (n1, 2)), np.random.normal(2, 1, (n2, 2))], axis=0)
+    y = np.concatenate([np.zeros((n1, 1)), np.ones((n2, 1))], axis=0).reshape(-1)
+
+    estimator_transformer = EstimatorTransformer(
+        estimator=LogisticRegression(max_iter=1000, random_state=0),
+        predict_func="predict_proba",
+        check_input= False
+        )
+
+    # Fit the data
+    estimator_transformer.fit(X, y)
+    print(f'Is the output multimodal? {estimator_transformer.multi_output_}')
+    ### Is the output multimodal? False
+
+    # Transform the data using "predict_func" as specified
+    transformed_X = estimator_transformer.transform(X)
+    print(f'Shape of transformed data: {transformed_X.shape}')
+    ### Shape of transformed data: (300, 1)
+    ```
     """
+
     def __init__(self, estimator, predict_func="predict", check_input=False):
         self.estimator = estimator
         self.predict_func = predict_func
@@ -52,12 +87,28 @@ class EstimatorTransformer(TransformerMixin, MetaEstimatorMixin, BaseEstimator):
         """
 
         if self.check_input:
-            X, y = check_X_y(X, y, estimator=self, dtype=FLOAT_DTYPES, multi_output=True)
+            X, y = validate_data(self, X=X, y=y, dtype=FLOAT_DTYPES, multi_output=True, reset=True)
+        else:
+            _check_n_features(self, X, reset=True)
 
         self.multi_output_ = len(y.shape) > 1
         self.estimator_ = clone(self.estimator)
         self.estimator_.fit(X, y, **kwargs)
+        self.n_features_in_ = X.shape[1]
+        # transform() returns one column per target for a multi output
+        # estimator, and reshapes to a single column otherwise.
+        self.n_outputs_ = y.shape[1] if self.multi_output_ else 1
         return self
+
+    @property
+    def _n_features_out(self):
+        """Number of columns `transform` produces.
+
+        Consumed by `ClassNamePrefixFeaturesOutMixin` to build the names
+        returned by `get_feature_names_out`.
+        """
+        check_is_fitted(self, "estimator_")
+        return self.n_outputs_
 
     def transform(self, X):
         """Transform the data by applying the `predict_func` of the fitted estimator.
@@ -73,7 +124,12 @@ class EstimatorTransformer(TransformerMixin, MetaEstimatorMixin, BaseEstimator):
             The transformed data. Array will be of shape `(X.shape[0], )` if estimator is not multi output.
             For multi output estimators an array of shape `(X.shape[0], y.shape[1])` is returned.
         """
-        
+
         check_is_fitted(self, "estimator_")
+        if self.check_input:
+            X = validate_data(self, X=X, dtype=FLOAT_DTYPES, reset=False)
+        else:
+            _check_n_features(self, X, reset=False)
+
         output = getattr(self.estimator_, self.predict_func)(X)
         return output if self.multi_output_ else output.reshape(-1, 1)

@@ -12,7 +12,7 @@ One solution to this problem is to turn the model into a transformer. To convert
 
 Let's demonstrate one example. Below we describe how to create a pipeline with two models that each see the same dataset. Note that the output of this pipeline is still only a transformer pipeline.
 
-![estimator-transformer1](/_static/preprocessing/estimator-transformer-1.png)
+![estimator-transformer1](../_static/preprocessing/estimator-transformer-1.png)
 
 ```py
 --8<-- "docs/_scripts/preprocessing.py:estimator-transformer-1"
@@ -32,7 +32,7 @@ array([[1.84239085, 1.8381264 ],
 
 Here's another example that works a little bit differently. Here we have two models that each see different data.
 
-![estimator-transformer2](/_static/preprocessing/estimator-transformer-2.png)
+![estimator-transformer2](../_static/preprocessing/estimator-transformer-2.png)
 
 ```py
 --8<-- "docs/_scripts/preprocessing.py:estimator-transformer-2"
@@ -52,13 +52,13 @@ array([[1.3810049 , 1.96265338],
 
 Transformers in scikit-learn typically do not add features. They replace them. Take `PCA` for example.
 
-![identity1](/_static/preprocessing/identity-transformer-1.png)
+![identity1](../_static/preprocessing/identity-transformer-1.png)
 
 The new dataset that comes out $X^{\text{new}}$ would no longer have columns ${x_1,...,x_4}$ but would instead replace them with ${x_{\text{PCA}_1}, x_{\text{PCA}_2}}$.
 
 If we rethink the pipeline a little bit we might not have to loose the original data.
 
-![identity2](/_static/preprocessing/identity-transformer-2.png)
+![identity2](../_static/preprocessing/identity-transformer-2.png)
 
 If you don't want to loose data, you can make use of a `FeatureUnion` and a [`IdentityTransformer`][id-transformer-api].
 
@@ -94,7 +94,7 @@ Some models are great at interpolation but less good at extrapolation.
 
 One way to potentially circumvent this problem is by capping extreme values that occur in the dataset $X$.
 
-![column-capping](/_static/preprocessing/column-capper.png)
+![column-capping](../_static/preprocessing/column-capper.png)
 
 Let's demonstrate how [`ColumnCapper`][column-capper-api] works in a few examples below.
 
@@ -114,60 +114,35 @@ Let's demonstrate how [`ColumnCapper`][column-capper-api] works in a few example
         [0.10029693, 0.89859006]])
     ```
 
-## Patsy Formulas
+## Formulaic (Wilkinson formulas)
 
 If you're used to the statistical programming language R you might have seen a formula object before. This is an object that represents a shorthand way to design variables used in a statistical model.
 
-The [patsy][patsy-docs] python project took this idea and made it available for python. From sklego we've made a wrapper, called [`PatsyTransformer`][patsy-api], such that you can also use these in your pipelines.
+The [formulaic][formulaic-docs] python project took this idea and made it available for python. From sklego we've made a wrapper, called [`FormulaicTransformer`][formulaic-api], such that you can also use these in your pipelines.
 
 ```py
---8<-- "docs/_scripts/preprocessing.py:patsy-1"
+--8<-- "docs/_scripts/preprocessing.py:formulaic-1"
 ```
 
-```console
-DesignMatrix with shape (5, 5)
-  Intercept  b[T.no]  b[T.yes]  a  np.log(a)
-          1        0         1  1    0.00000
-          1        0         1  2    0.69315
-          1        1         0  3    1.09861
-          1        0         0  4    1.38629
-          1        0         1  5    1.60944
-  Terms:
-    'Intercept' (column 0)
-    'b' (columns 1:3)
-    'a' (column 3)
-    'np.log(a)' (column 4)
-```
+--8<-- "docs/_static/preprocessing/formulaic-1.md"
 
 You might notice that the first column contains the constant array equal to one. You might also expect 3 dummy variable columns instead of 2.
 
-This is because the design matrix from patsy attempts to keep the columns in the matrix linearly independent of each other.
+This is because the design matrix from formulaic attempts to keep the columns in the matrix linearly independent of each other.
 
 If this is not something you'd want to create you can choose to omit
 it by indicating "-1" in the formula.
 
 ```py
---8<-- "docs/_scripts/preprocessing.py:patsy-2"
+--8<-- "docs/_scripts/preprocessing.py:formulaic-2"
 ```
 
-```console
-DesignMatrix with shape (5, 5)
-  b[maybe]  b[no]  b[yes]  a  np.log(a)
-         0      0       1  1    0.00000
-         0      0       1  2    0.69315
-         0      1       0  3    1.09861
-         1      0       0  4    1.38629
-         0      0       1  5    1.60944
-  Terms:
-    'b' (columns 0:3)
-    'a' (column 3)
-    'np.log(a)' (column 4)
-```
+--8<-- "docs/_static/preprocessing/formulaic-2.md"
 
-You'll notice that now the constant array is gone and it is replaced with a dummy array. Again this is now possible because patsy wants to guarantee that each column in this matrix is linearly independent of each other.
+You'll notice that now the constant array is gone and it is replaced with a dummy array. Again this is now possible because formulaic wants to guarantee that each column in this matrix is linearly independent of each other.
 
 The formula syntax is pretty powerful, if you'd like to learn we refer you
-to [formulas][patsy-formulas] documentation.
+to [formulas][formulaic-formulas] documentation.
 
 ## Repeating Basis Function Transformer
 
@@ -187,7 +162,7 @@ Let's make some random data to start with. We have input data `day`, `day_of_yea
 --8<-- "docs/_scripts/preprocessing.py:rbf-data"
 ```
 
-![rbf-data](/_static/preprocessing/rbf-data.png)
+![rbf-data](../_static/preprocessing/rbf-data.png)
 
 Let's now create repeating basis functions based on `day_of_year`:
 
@@ -201,7 +176,7 @@ Now let's plot our transformed features:
 --8<-- "docs/_scripts/preprocessing.py:rbf-plot"
 ```
 
-![rbf-plot](/_static/preprocessing/rbf-plot.png)
+![rbf-plot](../_static/preprocessing/rbf-plot.png)
 
 The `day_of_year` feature has been replaced with `N_PERIODS` repeating basis functions.
 These are bell curves that are equidistant over the 1-365 range. Each curve captures the information of *being close to* a particular `day_of_year`.
@@ -218,11 +193,45 @@ Let's use these features below in a regression.
 --8<-- "docs/_scripts/preprocessing.py:rbf-regr"
 ```
 
-![rbf-regr](/_static/preprocessing/rbf-regr.png)
+![rbf-regr](../_static/preprocessing/rbf-regr.png)
 
 Note that you can make this approach even more powerful for timeseries by choosing to ignore the far away past.
 
 To explore this idea we've also implemented a `DecayEstimator`. For more information see the [section on meta estimators][decay-section] for this.
+
+## Monotonic Spline Transformer
+
+The `MonotonicSplineTransformer` is a transformer that fits a monotonic spline to the input data. This can be useful when you want to capture non-linear relationships between features and the target variable, while ensuring that the relationship is monotonic. The technique is based on [_Fitting monotonic curves using splines_ blogpost by Mate Kadlicsko](https://matekadlicsko.github.io/posts/monotonic-splines/).
+
+To demonstrate how this works let's first generate some data.
+
+```py
+--8<-- "docs/_scripts/preprocessing.py:monotonic-spline"
+```
+
+
+![monotonic-spline](../_static/preprocessing/monotonic-spline.png)
+
+Next, let's show what the transformed data looks like.
+
+```py
+--8<-- "docs/_scripts/preprocessing.py:monotonic-spline-transform"
+```
+
+![monotonic-spline-transform](../_static/preprocessing/monotonic-spline-transform.png)
+
+Finally, let's show how these features might compare with an isotonic regression.
+
+```py
+--8<-- "docs/_scripts/preprocessing.py:monotonic-spline-regr"
+```
+
+![monotonic-spline-regr](../_static/preprocessing/monotonic-spline-regr.png)
+
+While the `IsotonicRegression` gives a similar result, there are a few reasons why the monotonic spline might be preferred:
+
+1. The monotonic model can result in a smoother model when followed up by a linear model. The linear model can still guarantee monotonicity, but the `IsotonicRegression` might result in a spiky output.
+2. When datasets get big, especially when there are many features involved, the monotonic spline might be faster to compute. This is because the `IsotonicRegression` demands a more complex solver that might not scale as well as a linear model.
 
 ## Interval Encoders
 
@@ -232,7 +241,7 @@ Sometimes a linear regression doesn't entirely do what you'd like. Take this pat
 --8<-- "docs/_scripts/preprocessing.py:interval-encoder-1"
 ```
 
-![interval-encoder-1](/_static/preprocessing/interval-encoder-1.png)
+![interval-encoder-1](../_static/preprocessing/interval-encoder-1.png)
 
 What we could do though, is preprocess the data such that it *can* be passed to a linear regression. We could construct intervals in the `x` values, smooth with regards to `y` and interpolate in between. You can see a demo of this below using the [`IntervalEncoder`][interval-encoder-api] from sklego.
 
@@ -240,7 +249,7 @@ What we could do though, is preprocess the data such that it *can* be passed to 
 --8<-- "docs/_scripts/preprocessing.py:interval-encoder-2"
 ```
 
-![interval-encoder-2](/_static/preprocessing/interval-encoder-2.png)
+![interval-encoder-2](../_static/preprocessing/interval-encoder-2.png)
 
 Note that we extrapolate using the estimates of the intervals at the edges. This ensures that we can make predictions out of sample.
 
@@ -248,7 +257,7 @@ Note that we extrapolate using the estimates of the intervals at the edges. This
 --8<-- "docs/_scripts/preprocessing.py:interval-encoder-3"
 ```
 
-![interval-encoder-3](/_static/preprocessing/interval-encoder-3.png)
+![interval-encoder-3](../_static/preprocessing/interval-encoder-3.png)
 
 ### Monotonic Encoding
 
@@ -266,7 +275,7 @@ Now that this is in there, let's first show the behavior of the `method="average
 --8<-- "docs/_scripts/preprocessing.py:monotonic-2"
 ```
 
-![monotonic-2](/_static/preprocessing/monotonic-2.png)
+![monotonic-2](../_static/preprocessing/monotonic-2.png)
 
 Now let's see what occurs when we add a constraint that enforces the feature to only be `method="increasing"` or `method="decreasing"`.
 
@@ -274,18 +283,27 @@ Now let's see what occurs when we add a constraint that enforces the feature to 
 --8<-- "docs/_scripts/preprocessing.py:monotonic-3"
 ```
 
-![monotonic-3](/_static/preprocessing/monotonic-3.png)
+![monotonic-3](../_static/preprocessing/monotonic-3.png)
 
 If these features are now passed to a model that supports monotonicity constraints then we can build models with guarantees.
 
-[estimator-transformer-api]: /api/meta#sklego.meta.estimator_transformer.EstimatorTransformer
-[meta-module]: /api/meta
-[id-transformer-api]: /api/preprocessing#sklego.preprocessing.identitytransformer.IdentityTransformer
-[column-capper-api]: /api/preprocessing#sklego.preprocessing.columncapper.ColumnCapper
-[patsy-api]: /api/preprocessing#sklego.preprocessing.patsytransformer.PatsyTransformer
-[rbf-api]: /api/preprocessing#sklego.preprocessing.repeatingbasis.RepeatingBasisFunction
-[interval-encoder-api]: /api/preprocessing#sklego.preprocessing.intervalencoder.IntervalEncoder
-[decay-section]: /user-guide/meta#decayed-estimation
+## Outlier Removal
 
-[patsy-docs]: https://patsy.readthedocs.io/en/latest/
-[patsy-formulas]: https://patsy.readthedocs.io/en/latest/formulas.html
+The [`OutlierRemover`][outlier-remover-api] class is a transformer that removes outliers from your dataset during training time only based on some outlier detector estimator. This can be useful in scenarios where outliers in the training data can negatively impact the performance of your model. By removing these outliers during training, your model can learn from a "clean" dataset that may lead to better performance.
+
+It's important to note that this transformer only removes outliers during training. This means that when you use your trained model to predict on new data, the new data will not have any outliers removed. This is useful because in a real-world scenario, new data may contain outliers and you would want your model to be able to handle these cases.
+
+The `OutlierRemover` class is initialized with an `outlier_detector` estimator, and a boolean flag `refit`. The outlier detector should be a scikit-learn compatible estimator that implements `.fit()` and `.predict()` methods. The refit flag determines whether the underlying estimator is fitted during `OutlierRemover.fit()`.
+
+[estimator-transformer-api]: ../../api/meta#sklego.meta.estimator_transformer.EstimatorTransformer
+[meta-module]: ../../api/meta
+[id-transformer-api]: ../../api/preprocessing#sklego.preprocessing.identitytransformer.IdentityTransformer
+[column-capper-api]: ../../api/preprocessing#sklego.preprocessing.columncapper.ColumnCapper
+[formulaic-api]: ../../api/preprocessing#sklego.preprocessing.formulaictransformer.FormulaicTransformer
+[rbf-api]: ../../api/preprocessing#sklego.preprocessing.repeatingbasis.RepeatingBasisFunction
+[interval-encoder-api]: ../../api/preprocessing#sklego.preprocessing.intervalencoder.IntervalEncoder
+[decay-section]: ../../user-guide/meta#decayed-estimation
+[outlier-remover-api]: ../../api/preprocessing#sklego.preprocessing.outlier_remover.OutlierRemover
+
+[formulaic-docs]: https://matthewwardrop.github.io/formulaic/
+[formulaic-formulas]: https://matthewwardrop.github.io/formulaic/formulas/

@@ -1,18 +1,41 @@
+from copy import deepcopy
+from typing import List, Union
+
+import narwhals.stable.v1 as nw
 import numpy as np
 import pandas as pd
 from sklearn import clone
-from sklearn.base import BaseEstimator, is_classifier
+from sklearn.base import BaseEstimator, ClassifierMixin, MetaEstimatorMixin, RegressorMixin, is_classifier, is_regressor
 from sklearn.utils.metaestimators import available_if
-from sklearn.utils.validation import check_array, check_is_fitted
+from sklearn.utils.validation import check_is_fitted
+from sklearn_compat.utils import get_tags
 
 from sklego.common import as_list, expanding_list
+from sklego.meta._grouped_utils import parse_X_y
+from sklego.meta._shrinkage_utils import (
+    ShrinkageMixin,
+    constant_shrinkage,
+    equal_shrinkage,
+    min_n_obs_shrinkage,
+    relative_shrinkage,
+)
 
-from ._grouped_utils import _split_groups_and_values, constant_shrinkage, min_n_obs_shrinkage, relative_shrinkage
 
+class GroupedPredictor(ShrinkageMixin, MetaEstimatorMixin, BaseEstimator):
+    """`GroupedPredictor` is a meta-estimator that fits a separate estimator for each group in the input data.
 
-class GroupedPredictor(BaseEstimator):
-    """Construct an estimator per data group. Splits data by values of a single column and fits one estimator per such
-    column.
+    The input data is split into a group and a value part: for each unique combination of the group columns, a separate
+    estimator is fitted to the corresponding value rows. The group columns are specified by the `groups` parameter.
+
+    If `use_global_model=True` a fallback estimator will be fitted on the entire dataset in case a group is not found
+    during `.predict()`.
+
+    If `shrinkage` is not `None`, the predictions of the group-level models are combined using a shrinkage method. The
+    shrinkage method can be one of the predefined methods `"constant"`, `"equal"`, `"min_n_obs"`, `"relative"` or a
+    custom shrinkage function. The shrinkage method is specified by the `shrinkage` parameter.
+
+    !!! warning "Shrinkage"
+        Shrinkage is only available for regression models.
 
     Parameters
     ----------
@@ -20,15 +43,17 @@ class GroupedPredictor(BaseEstimator):
         The estimator/pipeline to be applied per group.
     groups : int | str | List[int] | List[str]
         The column(s) of the array/dataframe to select as a grouping parameter set.
-    shrinkage : Literal["constant", "min_n_obs", "relative"] | Callable | None, default=None
+    shrinkage : Literal["constant", "equal", "min_n_obs", "relative"] | Callable | None, default=None
         How to perform shrinkage:
 
         - `None`: No shrinkage (default)
-        - `"constant"`: shrunk prediction for a level is weighted average of its prediction and its parents prediction
-        - `"min_n_obs"`: shrunk prediction is the prediction for the smallest group with at least n observations in it
-        - `"relative"`: each group-level is weight according to its size
+        - `"constant"`: the augmented prediction for each level is the weighted average between its prediction and the
+            augmented prediction for its parent.
+        - `"equal"`: each group is weighed equally.
+        - `"min_n_obs"`: use only the smallest group with a certain amount of observations.
+        - `"relative"`: weigh each group according to its size.
         - `Callable`: a function that takes a list of group lengths and returns an array of the same size with the
-            weights for each group
+            weights for each group.
     use_global_model : bool, default=True
 
         - With shrinkage: whether to have a model over the entire input as first group
@@ -39,12 +64,72 @@ class GroupedPredictor(BaseEstimator):
         If disabled, the model/pipeline is expected to handle e.g. missing, non-numeric, or non-finite values.
     **shrinkage_kwargs : dict
         Keyword arguments to the shrinkage function
+
+    Attributes
+    ----------
+    estimators_ : dict
+        A dictionary with the fitted estimators per group
+    groups_ : list
+        A list of all the groups that were found during fitting
+    fallback_ : estimator
+        A fallback estimator that is used when `use_global_model=True` and a group is not found during `.predict()`
+    shrinkage_function_ : callable
+        The shrinkage function that is used to calculate the shrinkage factors
+    shrinkage_factors_ : dict
+        A dictionary with the shrinkage factors per group
+
+    Example
+    -------
+    ```py
+    import pandas as pd
+    from sklearn.dummy import DummyRegressor
+    from sklego.meta import GroupedPredictor
+
+    results_df = pd.DataFrame(
+        {
+            "Grade": ["11", "11", "11", "11", "12", "12", "12", "12"],
+            "Course": ["Algebra", "Algebra", "English", "English", "Algebra", "Algebra", "English", "English"],
+            "Name": ["Mary", "Helen", "Mary", "Helen", "Mary", "Helen", "Mary", "Helen"],
+            "Result": [100, 94, 88, 92, 96, 98, 90, 90],
+        }
+    )
+
+    groups = ["Grade", "Name"]
+    target = "Result"
+
+    # We will use the DummyRegressor() to calculate the mean of each grouping
+    grouped_pred = GroupedPredictor(DummyRegressor(), groups)
+    grouped_pred.fit(results_df[groups], results_df[target])
+
+    # What is the average for Mary in Grade 12?
+    pred_df = pd.DataFrame(
+        {
+            "Grade": ["12"],
+            "Name": ["Mary"],
+        }
+    )
+
+    # Predicts the mean result of each student in each grade
+    pred = grouped_pred.predict(pred_df)
+
+    print(f"The average result of {pred_df["Name"][0]} in Grade {pred_df["Grade"][0]} was {pred}")
+    ### The average result of Mary in Grade 12 was 93.0
+    ```
     """
 
     # Number of features in value df can be 0, e.g. for dummy models
     _check_kwargs = {"ensure_min_features": 0, "accept_large_sparse": False}
     _global_col_name = "a-column-that-is-constant-for-all-data"
     _global_col_value = "global"
+
+    _ALLOWED_SHRINKAGE = {
+        "constant": constant_shrinkage,
+        "relative": relative_shrinkage,
+        "min_n_obs": min_n_obs_shrinkage,
+        "equal": equal_shrinkage,
+    }
+
+    _required_parameters = ["estimator", "groups"]
 
     def __init__(
         self,
@@ -53,7 +138,7 @@ class GroupedPredictor(BaseEstimator):
         shrinkage=None,
         use_global_model=True,
         check_X=True,
-        **shrinkage_kwargs,
+        shrinkage_kwargs=None,
     ):
         self.estimator = estimator
         self.groups = groups
@@ -62,70 +147,6 @@ class GroupedPredictor(BaseEstimator):
         self.shrinkage_kwargs = shrinkage_kwargs
         self.check_X = check_X
 
-    def __set_shrinkage_function(self):
-        if self.shrinkage and len(as_list(self.groups)) == 1 and not self.use_global_model:
-            raise ValueError("Cannot do shrinkage with a single group if use_global_model is False")
-
-        if isinstance(self.shrinkage, str):
-            # Predefined shrinkage functions
-            shrink_options = {
-                "constant": constant_shrinkage,
-                "relative": relative_shrinkage,
-                "min_n_obs": min_n_obs_shrinkage,
-            }
-
-            try:
-                self.shrinkage_function_ = shrink_options[self.shrinkage]
-            except KeyError:
-                raise ValueError(
-                    f"The specified shrinkage function {self.shrinkage} is not valid, "
-                    f"choose from {list(shrink_options.keys())} or supply a callable."
-                )
-        elif callable(self.shrinkage):
-            self.__check_shrinkage_func()
-            self.shrinkage_function_ = self.shrinkage
-        else:
-            raise ValueError("Invalid shrinkage specified. Should be either None (no shrinkage), str or callable.")
-
-    def __check_shrinkage_func(self):
-        """Validate the shrinkage function if a function is specified"""
-        group_lengths = [10, 5, 2]
-        expected_shape = np.array(group_lengths).shape
-        try:
-            result = self.shrinkage(group_lengths)
-        except Exception as e:
-            raise ValueError(f"Caught an exception while checking the shrinkage function: {str(e)}") from e
-        else:
-            if not isinstance(result, np.ndarray):
-                raise ValueError(f"shrinkage_function({group_lengths}) should return an np.ndarray")
-            if result.shape != expected_shape:
-                raise ValueError(f"shrinkage_function({group_lengths}).shape should be {expected_shape}")
-
-    def __get_shrinkage_factor(self, X_group):
-        """Get for all complete groups an array of shrinkages"""
-        group_colnames = X_group.columns.to_list()
-        counts = X_group.groupby(group_colnames).size()
-
-        # Groups that are split on all
-        most_granular_groups = [grp for grp in self.groups_ if len(as_list(grp)) == len(group_colnames)]
-
-        # For each hierarchy level in each most granular group, get the number of observations
-        hierarchical_counts = {
-            granular_group: [counts[tuple(subgroup)].sum() for subgroup in expanding_list(granular_group, tuple)]
-            for granular_group in most_granular_groups
-        }
-
-        # For each hierarchy level in each most granular group, get the shrinkage factor
-        shrinkage_factors = {
-            group: self.shrinkage_function_(counts, **self.shrinkage_kwargs)
-            for group, counts in hierarchical_counts.items()
-        }
-
-        # Make sure that the factors sum to one
-        shrinkage_factors = {group: value / value.sum() for group, value in shrinkage_factors.items()}
-
-        return shrinkage_factors
-
     def __fit_single_group(self, group, X, y=None):
         """Fit estimator to the given group."""
         try:
@@ -133,60 +154,52 @@ class GroupedPredictor(BaseEstimator):
         except Exception as e:
             raise type(e)(f"Exception for group {group}: {e}")
 
-    def __fit_grouped_estimator(self, X_group, X_value, y=None, columns=None):
+    def __fit_grouped_estimator(
+        self, frame: nw.DataFrame, y: Union[np.ndarray, None] = None, columns: Union[List[int], List[str], None] = None
+    ):
         """Fit an estimator to each group"""
-        # Reset indices such that they are the same in X and y
-        if not columns:
-            columns = X_group.columns.tolist()
 
-        # Make the groups based on the groups dataframe, use the indices on the values array
-        try:
-            group_indices = X_group.groupby(columns).indices
-        except TypeError:
-            # This one is needed because of line #918 of sklearn/utils/estimator_checks
-            raise TypeError("argument must be a string, date or number")
+        if columns is None:
+            columns = self._groups
 
-        if y is not None:
-            if isinstance(y, pd.Series):
-                y.index = X_group.index
-
-            grouped_estimators = {
-                # Fit a clone of the transformer to each group
-                group: self.__fit_single_group(group, X_value[indices, :], y[indices])
-                for group, indices in group_indices.items()
-            }
-        else:
-            grouped_estimators = {
-                group: self.__fit_single_group(group, X_value[indices, :]) for group, indices in group_indices.items()
-            }
+        to_drop = list(set(["__sklego_target__", *columns, *as_list(self.groups)]))
+        grouped_estimators = {
+            # Fit a clone of the estimators to each group
+            (group_name[0] if len(group_name) == 1 else group_name): self.__fit_single_group(
+                group=(group_name[0] if len(group_name) == 1 else group_name),
+                X=nw.to_native(X_grp.drop(to_drop)),
+                y=(X_grp.select("__sklego_target__").to_numpy().reshape(-1) if y is not None else None),
+            )
+            for group_name, X_grp in frame.group_by(columns)
+        }
 
         return grouped_estimators
 
-    def __fit_shrinkage_groups(self, X_group, X_value, y):
+    def __fit_shrinkage_groups(self, frame, y):
         estimators = {}
 
         for grouping_colnames in self.group_colnames_hierarchical_:
             # Fit a grouped estimator to each (sub)group hierarchically
-            estimators.update(self.__fit_grouped_estimator(X_group, X_value, y, columns=grouping_colnames))
+            estimators.update(self.__fit_grouped_estimator(frame, y, columns=grouping_colnames))
 
         return estimators
 
-    def __add_shrinkage_column(self, X_group):
+    def __add_shrinkage_column(self, frame, groups=None):
         """Add global group as first column if needed for shrinkage"""
 
         if self.shrinkage is not None and self.use_global_model:
-            return pd.concat(
-                [
-                    pd.Series(
-                        [self._global_col_value] * len(X_group),
-                        name=self._global_col_name,
-                    ),
-                    X_group,
-                ],
-                axis=1,
-            )
+            n_samples = frame.shape[0]
 
-        return X_group
+            frame = frame.select(
+                nw.from_dict(
+                    data={self._global_col_name: np.full(shape=n_samples, fill_value=self._global_col_value)},
+                    native_namespace=nw.get_native_namespace(frame),
+                )[self._global_col_name],
+                nw.all(),
+            )
+            groups = [self._global_col_name] if groups is None else [self._global_col_name, *groups]
+
+        return frame, groups
 
     def fit(self, X, y=None):
         """Fit one estimator for each group of training data `X` and `y`.
@@ -208,63 +221,81 @@ class GroupedPredictor(BaseEstimator):
         self : GroupedPredictor
             The fitted estimator.
         """
-        X_group, X_value = _split_groups_and_values(
-            X, self.groups, min_value_cols=0, check_X=self.check_X, **self._check_kwargs
-        )
+        if self.shrinkage is not None and not is_regressor(self.estimator):
+            raise ValueError("Shrinkage is only available for regression models")
 
-        X_group = self.__add_shrinkage_column(X_group)
+        _group_cols = as_list(deepcopy(self.groups)) if self.groups is not None else None
 
-        if y is not None:
-            y = check_array(y, ensure_2d=False)
+        if (
+            self.shrinkage is not None
+            and _group_cols is not None
+            and len(_group_cols) == 1
+            and not self.use_global_model
+        ):
+            raise ValueError("Shrinkage is not null, but found a total of 1 groups")
 
-        if self.shrinkage is not None:
-            self.__set_shrinkage_function()
+        X = nw.from_native(X, strict=False, eager_only=True)
+
+        frame = parse_X_y(X, y, _group_cols, check_X=self.check_X, **self._check_kwargs)
+        frame, _group_cols = self.__add_shrinkage_column(frame, _group_cols)
+        self.n_features_in_ = frame.shape[1] - 1
+        self.n_fitted_levels_ = 1 + self.use_global_model
+
+        self.shrinkage_function_ = self._set_shrinkage_function()
 
         # List of all hierarchical subsets of columns
-        self.group_colnames_hierarchical_ = expanding_list(X_group.columns, list)
-
+        self.group_colnames_hierarchical_ = expanding_list(_group_cols, list)
         self.fallback_ = None
 
         if self.shrinkage is None and self.use_global_model:
-            self.fallback_ = clone(self.estimator).fit(X_value, y)
+            X_ = nw.to_native(frame.drop([*_group_cols, "__sklego_target__"]))
+            y_ = nw.to_native(frame["__sklego_target__"])
+
+            self.fallback_ = clone(self.estimator).fit(X_, y_)
 
         if self.shrinkage is not None:
-            self.estimators_ = self.__fit_shrinkage_groups(X_group, X_value, y)
+            self.estimators_ = self.__fit_shrinkage_groups(frame, y)
         else:
-            self.estimators_ = self.__fit_grouped_estimator(X_group, X_value, y)
+            self.estimators_ = self.__fit_grouped_estimator(frame, y, columns=_group_cols)
 
         self.groups_ = as_list(self.estimators_.keys())
 
         if self.shrinkage is not None:
-            self.shrinkage_factors_ = self.__get_shrinkage_factor(X_group)
+            _groups = (
+                [self._global_col_name, *as_list(deepcopy(self.groups))]
+                if self.use_global_model
+                else as_list(deepcopy(self.groups))
+            )
+
+            self.shrinkage_factors_ = self._fit_shrinkage_factors(frame, groups=_groups, most_granular_only=True)
+            self.shrinkage_factors_ = {(k[0] if len(k) == 1 else k): v for k, v in self.shrinkage_factors_.items()}
 
         return self
 
-    def __predict_shrinkage_groups(self, X_group, X_value, method="predict"):
+    def __predict_shrinkage_groups(self, frame, method="predict", groups=None):
         """Make predictions for all shrinkage groups"""
         # DataFrame with predictions for each hierarchy level, per row. Missing groups errors are thrown here.
         hierarchical_predictions = pd.concat(
             [
-                pd.Series(self.__predict_groups(X_group, X_value, level_columns, method=method))
+                pd.Series(self.__predict_groups(frame, method=method, groups=level_columns))
                 for level_columns in self.group_colnames_hierarchical_
             ],
             axis=1,
         )
 
         # This is a Series with values the tuples of hierarchical grouping
-        prediction_groups = pd.Series([tuple(_) for _ in X_group.itertuples(index=False)])
+        prediction_groups = pd.Series([tuple(_) for _ in frame.select(groups).to_pandas().itertuples(index=False)])
 
         # This is a Series of arrays
         shrinkage_factors = prediction_groups.map(self.shrinkage_factors_)
 
         # Convert the Series of arrays it to a DataFrame
         shrinkage_factors = pd.DataFrame.from_dict(shrinkage_factors.to_dict()).T
+
         return (hierarchical_predictions * shrinkage_factors).sum(axis=1)
 
     def __predict_single_group(self, group, X, method="predict"):
         """Predict a single group by getting its estimator from the fitted dict"""
-        # Keep track of the original index such that we can sort in __predict_groups
-        index = X.index
 
         try:
             group_predictor = self.estimators_[group]
@@ -272,9 +303,7 @@ class GroupedPredictor(BaseEstimator):
             if self.fallback_:
                 group_predictor = self.fallback_
             else:
-                raise ValueError(
-                    f"Found new group {group} during predict with use_global_model = False"
-                )
+                raise ValueError(f"Found new group {group} during predict with use_global_model = False")
 
         is_predict_proba = is_classifier(group_predictor) and method == "predict_proba"
         # Ensure to provide pd.DataFrame with the correct label name
@@ -282,42 +311,29 @@ class GroupedPredictor(BaseEstimator):
 
         # getattr(group_predictor, method) returns the predict method of the fitted model
         # if the method argument is "predict" and the predict_proba method if method argument is "predict_proba"
-        return pd.DataFrame(
-            getattr(group_predictor, method)(X), **extra_kwargs
-        ).set_index(index)
+        return pd.DataFrame(getattr(group_predictor, method)(X), **extra_kwargs)
 
-    def __predict_groups(
-        self,
-        X_group: pd.DataFrame,
-        X_value: np.array,
-        group_cols=None,
-        method="predict",
-    ):
+    def __predict_groups(self, frame: nw.DataFrame, method="predict", groups=None):
         """Predict for all groups"""
-        # Reset indices such that they are the same in X_group (reset in __check_grouping_columns),
-        # this way we can track the order of the result
-        X_value = pd.DataFrame(X_value).reset_index(drop=True)
 
-        if group_cols is None:
-            group_cols = X_group.columns.tolist()
-
-        # Make the groups based on the groups dataframe, use the indices on the values array
-        group_indices = X_group.groupby(group_cols).indices
-
+        n_samples = frame.shape[0]
+        frame = frame.with_columns(__sklego_index__=np.arange(n_samples))
         return (
             pd.concat(
                 [
                     self.__predict_single_group(
-                        group, X_value.loc[indices, :], method=method
-                    )
-                    for group, indices in group_indices.items()
+                        (group_value[0] if len(group_value) == 1 else group_value),
+                        nw.to_native(X_grp.drop(["__sklego_index__", *groups, *as_list(self.groups)])),
+                        method=method,
+                    ).set_index(X_grp["__sklego_index__"].to_numpy().reshape(-1).astype(int))
+                    for group_value, X_grp in frame.group_by(groups)
                 ],
                 axis=0,
             )
-            # Fill with prob = 0 for impossible labels in predict_proba
             .fillna(0)
             .sort_index()
-            .values.squeeze()
+            .to_numpy()
+            .squeeze()
         )
 
     def predict(self, X):
@@ -337,16 +353,17 @@ class GroupedPredictor(BaseEstimator):
         """
         check_is_fitted(self, ["estimators_", "groups_", "fallback_"])
 
-        X_group, X_value = _split_groups_and_values(
-            X, self.groups, min_value_cols=0, check_X=self.check_X, **self._check_kwargs
+        _group_cols = as_list(deepcopy(self.groups)) if self.groups is not None else None
+        X = nw.from_native(X, strict=False, eager_only=True)
+        frame = parse_X_y(X, y=None, groups=_group_cols, check_X=self.check_X, **self._check_kwargs).drop(
+            "__sklego_target__"
         )
-
-        X_group = self.__add_shrinkage_column(X_group)
+        frame, _group_cols = self.__add_shrinkage_column(frame, _group_cols)
 
         if self.shrinkage is None:
-            return self.__predict_groups(X_group, X_value, method="predict")
+            return self.__predict_groups(frame, method="predict", groups=_group_cols)
         else:
-            return self.__predict_shrinkage_groups(X_group, X_value, method="predict")
+            return self.__predict_shrinkage_groups(frame, method="predict", groups=_group_cols)
 
     # This ensures that the meta-estimator only has the predict_proba method if the estimator has it
     @available_if(lambda self: hasattr(self.estimator, "predict_proba"))
@@ -368,18 +385,17 @@ class GroupedPredictor(BaseEstimator):
         """
         check_is_fitted(self, ["estimators_", "groups_", "fallback_"])
 
-        X_group, X_value = _split_groups_and_values(
-            X, self.groups, min_value_cols=0, check_X=self.check_X, **self._check_kwargs
+        _group_cols = as_list(deepcopy(self.groups)) if self.groups is not None else None
+        X = nw.from_native(X, strict=False, eager_only=True)
+        frame = parse_X_y(X, y=None, groups=_group_cols, check_X=self.check_X, **self._check_kwargs).drop(
+            "__sklego_target__"
         )
-
-        X_group = self.__add_shrinkage_column(X_group)
+        frame, _group_cols = self.__add_shrinkage_column(frame, _group_cols)
 
         if self.shrinkage is None:
-            return self.__predict_groups(X_group, X_value, method="predict_proba")
+            return self.__predict_groups(frame, method="predict_proba", groups=_group_cols)
         else:
-            return self.__predict_shrinkage_groups(
-                X_group, X_value, method="predict_proba"
-            )
+            return self.__predict_shrinkage_groups(frame, method="predict_proba", groups=_group_cols)
 
     # This ensures that the meta-estimator only has the predict_proba method if the estimator has it
     @available_if(lambda self: hasattr(self.estimator, "decision_function"))
@@ -403,15 +419,125 @@ class GroupedPredictor(BaseEstimator):
         """
         check_is_fitted(self, ["estimators_", "groups_", "fallback_"])
 
-        X_group, X_value = _split_groups_and_values(
-            X, self.groups, min_value_cols=0, check_X=self.check_X, **self._check_kwargs
-        )
+        _group_cols = as_list(deepcopy(self.groups)) if self.groups is not None else None
+        X = nw.from_native(X, strict=False, eager_only=True)
 
-        X_group = self.__add_shrinkage_column(X_group)
+        frame = parse_X_y(X, y=None, groups=_group_cols, check_X=self.check_X, **self._check_kwargs).drop(
+            "__sklego_target__"
+        )
+        frame, _group_cols = self.__add_shrinkage_column(frame, _group_cols)
 
         if self.shrinkage is None:
-            return self.__predict_groups(X_group, X_value, method="decision_function")
+            return self.__predict_groups(frame, method="decision_function", groups=_group_cols)
         else:
-            return self.__predict_shrinkage_groups(
-                X_group, X_value, method="decision_function"
-            )
+            return self.__predict_shrinkage_groups(frame, method="decision_function", groups=_group_cols)
+
+    @property
+    def _estimator_type(self):
+        """Computes `_estimator_type` dynamically from the wrapped model."""
+        return get_tags(self.estimator).estimator_type
+
+    def _more_tags(self):
+        return {"allow_nan": True}
+
+    def __sklearn_tags__(self):
+        estimator_tags = get_tags(self.estimator)
+
+        tags = super().__sklearn_tags__()
+        tags.input_tags.allow_nan = True
+        tags.classifier_tags = estimator_tags.classifier_tags
+        tags.regressor_tags = estimator_tags.regressor_tags
+
+        return tags
+
+
+class GroupedRegressor(RegressorMixin, GroupedPredictor):
+    """`GroupedRegressor` is a meta-estimator that fits a separate regressor for each group in the input data.
+
+    Its spec is the same as [`GroupedPredictor`][sklego.meta.grouped_predictor.GroupedPredictor] but it is available
+    only for regression models.
+
+    !!! info "New in version 0.8.0"
+    """
+
+    def fit(self, X, y):
+        """Fit one regressor for each group of training data `X` and `y`.
+
+        Will also learn the groups that exist within the training dataset.
+
+        Parameters
+        ----------
+        X : array-like of shape (n_samples, n_features)
+            Training data.
+        y : array-like of shape (n_samples,)
+            Target values.
+
+        Returns
+        -------
+        self : GroupedRegressor
+            The fitted regressor.
+
+        Raises
+        -------
+        ValueError
+            If the supplied estimator is not a regressor.
+
+        """
+        if not is_regressor(self.estimator):
+            raise ValueError("GroupedRegressor is only available for regression models")
+
+        return super().fit(X, y)
+
+
+class GroupedClassifier(ClassifierMixin, GroupedPredictor):
+    """`GroupedClassifier` is a meta-estimator that fits a separate classifier for each group in the input data.
+
+    Its equivalent to [`GroupedPredictor`][sklego.meta.grouped_predictor.GroupedPredictor] with `shrinkage=None`
+    but it is available only for classification models.
+
+    !!! info "New in version 0.8.0"
+    """
+
+    def __init__(
+        self,
+        estimator,
+        groups,
+        use_global_model=True,
+        check_X=True,
+        **shrinkage_kwargs,
+    ):
+        super().__init__(
+            estimator=estimator,
+            groups=groups,
+            shrinkage=None,
+            use_global_model=use_global_model,
+            check_X=check_X,
+        )
+
+    def fit(self, X, y):
+        """Fit one classifier for each group of training data `X` and `y`.
+
+        Will also learn the groups that exist within the training dataset.
+
+        Parameters
+        ----------
+        X : array-like of shape (n_samples, n_features)
+            Training data.
+        y : array-like of shape (n_samples,)
+            Target values.
+
+        Returns
+        -------
+        self : GroupedClassifier
+            The fitted classifier.
+
+        Raises
+        -------
+        ValueError
+            If the supplied estimator is not a classifier.
+        """
+
+        if not is_classifier(self.estimator):
+            raise ValueError("GroupedClassifier is only available for classification models")
+        self.classes_ = np.unique(y)
+        return super().fit(X, y)

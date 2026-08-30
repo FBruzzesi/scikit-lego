@@ -2,7 +2,6 @@
 Pipelines, variances to the `sklearn.pipeline.Pipeline` object.
 """
 
-
 import logging
 import time
 
@@ -12,13 +11,6 @@ from sklearn.utils.validation import check_memory
 
 def default_log_callback(output, execution_time, **kwargs):
     """The default log callback which logs the step name, shape of the output and the execution time of the step.
-
-    Parameters
-    ----------
-    output : tuple[np.ndarray | pd.DataFrame, estimator | transformer]
-        The output of the step and a step in the pipeline.
-    execution_time : float
-        The execution time of the step.
 
     !!! info
 
@@ -32,10 +24,16 @@ def default_log_callback(output, execution_time, **kwargs):
         | `output`         | T                | The output of the function     |
         | `execution_time` | float            | The execution time of the step |
 
+    Parameters
+    ----------
+    output : tuple[np.ndarray | pd.DataFrame, estimator | transformer]
+        The output of the step and a step in the pipeline.
+    execution_time : float
+        The execution time of the step.
     """
     logger = logging.getLogger(__name__)
     step_result, step = output
-    logger.info(f"[{step}] shape={step_result.shape} " f"time={int(execution_time)}s")
+    logger.info(f"[{step}] shape={step_result.shape} time={int(execution_time)}s")
 
 
 def _log_wrapper(log_callback=default_log_callback):
@@ -98,18 +96,11 @@ def _cache_with_function_log_statement(log_callback=default_log_callback):
 class DebugPipeline(Pipeline):
     """A pipeline that has a log statement in between each step, useful for debugging purposes.
 
-    Parameters
-    ----------
-    log_callback : Callable | None, default=None
-        The callback function that logs information in between each intermediate step.
-        If set to `"default"`, `default_log_callback` is used.
-
-    Notes
-    -----
     See [`sklearn.pipeline.Pipeline`](https://scikit-learn.org/stable/modules/generated/sklearn.pipeline.Pipeline.html#sklearn.pipeline.Pipeline)
-    for all other variables.
+    for all other parameters other than `log_callback`.
 
     !!! note
+
         This implementation is a hack on the original sklearn Pipeline. It aims to have the same behaviour as the
         original sklearn Pipeline, while changing minimal amount of code.
 
@@ -125,6 +116,11 @@ class DebugPipeline(Pipeline):
         - The [`joblib.memory.Memory`](https://joblib.readthedocs.io/en/latest/generated/joblib.Memory.html)
             starts using a `_cache` method.
 
+    Parameters
+    ----------
+    log_callback : Callable | None, default=None
+        The callback function that logs information in between each intermediate step.
+        If set to `"default"`, `default_log_callback` is used.
 
     Examples
     --------
@@ -312,6 +308,48 @@ class DebugPipeline(Pipeline):
         self._log_callback = func
         if self._log_callback == "default":
             self._log_callback = default_log_callback
+
+    def __getstate__(self):
+        """
+        Prepare the state of the object for pickling.
+
+        This method is called when the object is being pickled. It ensures that the `Memory` object is in its original
+        state by temporarily restoring the original `cache` method and removing the custom `_cache` attribute. This is
+        necessary because the custom `_cache` attribute is not picklable and would cause errors during the pickling
+        process.
+
+        Returns
+        -------
+        dict
+            The state of the object to be pickled.
+        """
+        state = self.__dict__.copy()
+        if hasattr(self._memory, "_cache"):
+            self._memory.cache = self._memory._cache
+            del self._memory._cache
+        return state
+
+    def __setstate__(self, state):
+        """
+        Restore the state of the object from the pickled state.
+
+        This method is called when the object is being unpickled. It restores the state of the object and re-applies the
+        custom `_cache` attribute by wrapping the `cache` method with the logging wrapper (`_cache_with_function_log_statement`).
+        This ensures that the `Memory` object has the custom `_cache` attribute after unpickling.
+
+        Parameters
+        ----------
+        state : dict
+            The state of the object to be restored.
+        """
+        self.__dict__.update(state)
+        if self._log_callback is not None:
+            self._memory = check_memory(self._memory)
+            if not hasattr(self._memory, "_cache"):
+                self._memory._cache = self._memory.cache
+            self._memory.cache = _cache_with_function_log_statement(self._log_callback).__get__(
+                self._memory, self._memory.__class__
+            )
 
 
 def make_debug_pipeline(*steps, **kwargs):

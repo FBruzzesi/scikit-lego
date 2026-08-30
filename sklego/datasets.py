@@ -1,8 +1,14 @@
-import os
+import sys
 
 import numpy as np
 import pandas as pd
-from pkg_resources import resource_filename
+
+if sys.version_info >= (3, 9):
+    import importlib.resources as importlib_resources  # pragma: no cover
+else:
+    import importlib_resources as importlib_resources  # pragma: no cover
+
+
 from sklearn.datasets import fetch_openml
 
 
@@ -92,7 +98,7 @@ def load_penguins(return_X_y=False, as_frame=False):
 
         (Accessed 2020-06-08).
     """
-    filepath = resource_filename("sklego", os.path.join("data", "penguins.zip"))
+    filepath = importlib_resources.files("sklego") / "data" / "penguins.zip"
     df = pd.read_csv(filepath)
     if as_frame:
         return df
@@ -106,8 +112,8 @@ def load_penguins(return_X_y=False, as_frame=False):
                 "body_mass_g",
                 "sex",
             ]
-        ].values,
-        df["species"].values,
+        ].to_numpy(),
+        df["species"].to_numpy(),
     )
     if return_X_y:
         return X, y
@@ -146,18 +152,18 @@ def load_arrests(return_X_y=False, as_frame=False):
     ```
 
     The dataset was copied from the carData R package
-    ([dataset documentation](http://vincentarelbundock.github.io/Rdatasets/doc/carData/Arrests.html))
+    ([dataset documentation](https://vincentarelbundock.github.io/Rdatasets/doc/carData/Arrests.html))
     and can originally be found in:
 
     - Personal communication from Michael Friendly, York University.
     """
-    filepath = resource_filename("sklego", os.path.join("data", "arrests.zip"))
+    filepath = importlib_resources.files("sklego") / "data" / "arrests.zip"
     df = pd.read_csv(filepath)
     if as_frame:
         return df
     X, y = (
-        df[["colour", "year", "age", "sex", "employed", "citizen", "checks"]].values,
-        df["released"].values,
+        df[["colour", "year", "age", "sex", "employed", "citizen", "checks"]].to_numpy(),
+        df["released"].to_numpy(),
     )
     if return_X_y:
         return X, y
@@ -198,11 +204,11 @@ def load_chicken(return_X_y=False, as_frame=False):
     - Crowder, M. and Hand, D. (1990), Analysis of Repeated Measures, Chapman and Hall (example 5.3)
     - Hand, D. and Crowder, M. (1996), Practical Longitudinal Data Analysis, Chapman and Hall (table A.2)
     """
-    filepath = resource_filename("sklego", os.path.join("data", "chickweight.zip"))
+    filepath = importlib_resources.files("sklego") / "data" / "chickweight.zip"
     df = pd.read_csv(filepath)
     if as_frame:
         return df
-    X, y = df[["time", "diet", "chick"]].values, df["weight"].values
+    X, y = df[["time", "diet", "chick"]].to_numpy(), df["weight"].to_numpy()
     if return_X_y:
         return X, y
     return {"data": X, "target": y}
@@ -244,7 +250,7 @@ def load_abalone(return_X_y=False, as_frame=False):
 
         Sea Fisheries Division, Technical Report No. 48 (ISSN 1034-3288)
     """
-    filepath = resource_filename("sklego", os.path.join("data", "abalone.zip"))
+    filepath = importlib_resources.files("sklego") / "data" / "abalone.zip"
     df = pd.read_csv(filepath)
     if as_frame:
         return df
@@ -259,8 +265,8 @@ def load_abalone(return_X_y=False, as_frame=False):
             "shell_weight",
             "rings",
         ]
-    ].values
-    y = df["sex"].values
+    ].to_numpy()
+    y = df["sex"].to_numpy()
     if return_X_y:
         return X, y
     return {"data": X, "target": y}
@@ -294,12 +300,12 @@ def load_heroes(return_X_y=False, as_frame=False):
     # Index(['name', 'attack_type', 'role', 'health', 'attack', 'attack_spd'], dtype='object')
     ```
     """
-    filepath = resource_filename("sklego", os.path.join("data", "heroes.zip"))
+    filepath = importlib_resources.files("sklego") / "data" / "heroes.zip"
     df = pd.read_csv(filepath)
     if as_frame:
         return df
-    X = df[["health", "attack"]].values
-    y = df["attack_type"].values
+    X = df[["health", "attack"]].to_numpy()
+    y = df["attack_type"].to_numpy()
     if return_X_y:
         return X, y
     return {"data": X, "target": y}
@@ -351,7 +357,7 @@ def load_hearts(return_X_y=False, as_frame=False):
     The documentation of the dataset can be viewed at:
     https://archive.ics.uci.edu/ml/machine-learning-databases/heart-disease/heart-disease.names
     """
-    filepath = resource_filename("sklego", os.path.join("data", "hearts.zip"))
+    filepath = importlib_resources.files("sklego") / "data" / "hearts.zip"
     df = pd.read_csv(filepath)
     if as_frame:
         return df
@@ -371,8 +377,8 @@ def load_hearts(return_X_y=False, as_frame=False):
             "ca",
             "thal",
         ]
-    ].values
-    y = df["target"].values
+    ].to_numpy()
+    y = df["target"].to_numpy()
     if return_X_y:
         return X, y
     return {"data": X, "target": y}

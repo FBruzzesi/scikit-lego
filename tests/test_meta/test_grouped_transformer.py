@@ -1,38 +1,46 @@
 import itertools as it
+
 import numpy as np
 import pandas as pd
+import polars as pl
+import pyarrow as pa
 import pytest
+import sklearn
+from pandas.testing import assert_frame_equal
+from sklearn import clone
+from sklearn.impute import SimpleImputer
 from sklearn.linear_model import LinearRegression
-from sklearn.preprocessing import StandardScaler, MinMaxScaler
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import LabelEncoder, MinMaxScaler, StandardScaler, TargetEncoder
 from sklearn.utils import check_X_y
+from sklearn_compat.utils.estimator_checks import parametrize_with_checks
 
-from sklego.common import flatten
-from sklego.datasets import load_penguins
+from sklego.datasets import load_heroes, load_penguins
 from sklego.meta import GroupedTransformer
-from tests.conftest import transformer_checks, general_checks, select_tests
-from tests.conftest import n_vals, k_vals, np_types
+from tests.conftest import DATAFRAME_ARRAY_API_REASON, expect_array_api_failure, k_vals, n_vals, np_types
 
 
-@pytest.mark.parametrize(
-    "test_fn",
-    select_tests(
-        flatten([transformer_checks, general_checks]),
-        exclude=[
-            # Nonsense checks because we always need at least two columns (group and value)
-            "check_fit2d_1feature",
-            "check_fit2d_predict1d",
-            "check_transformer_data_not_an_array",
-        ]
-    )
+@parametrize_with_checks(
+    [GroupedTransformer(StandardScaler(), groups=0, check_X=True)],
+    expected_failed_checks=expect_array_api_failure(DATAFRAME_ARRAY_API_REASON),
 )
-def test_estimator_checks(test_fn):
-    trf = GroupedTransformer(StandardScaler(), groups=0)
-    test_fn(GroupedTransformer.__name__, trf)
+def test_sklearn_compatible_estimator(estimator, check):
+    if check.func.__name__ in {
+        "check_transformer_data_not_an_array",  # TODO: Look into this
+        "check_fit2d_1feature",  # custom message
+        "check_fit2d_predict1d",  # custom message
+        "check_dtype_object",  # custom message
+        "check_estimators_empty_data_messages",  # custom message
+        "check_estimators_pickle",  # Fails if input contains nan
+        "check_fit1d",
+        "check_n_features_in_after_fitting",  # custom check without validate_data
+    }:
+        pytest.skip()
+
+    check(estimator)
 
 
-@pytest.fixture(
-    scope="module", params=[_ for _ in it.product(n_vals, k_vals, np_types)]
-)
+@pytest.fixture(scope="module", params=[_ for _ in it.product(n_vals, k_vals, np_types)])
 def dataset_with_single_grouping(request):
     n, k, np_type = request.param
     np.random.seed(42)
@@ -42,16 +50,14 @@ def dataset_with_single_grouping(request):
     X, y = check_X_y(X, y)
 
     # Make sure all groups are present
-    groups = np.repeat([0, 1], repeats=(X.shape[0] + 1) // 2)[:X.shape[0], np.newaxis]
+    groups = np.repeat([0, 1], repeats=(X.shape[0] + 1) // 2)[: X.shape[0], np.newaxis]
     X_with_groups = np.concatenate([groups, X], axis=1)
     grouper = 0  # First column
 
     return X, y, groups, X_with_groups, grouper
 
 
-@pytest.fixture(
-    scope="module", params=[_ for _ in it.product(n_vals, k_vals, np_types)]
-)
+@pytest.fixture(scope="module", params=[_ for _ in it.product(n_vals, k_vals, np_types)])
 def dataset_with_multiple_grouping(request):
     n, k, np_type = request.param
     np.random.seed(42)
@@ -63,8 +69,8 @@ def dataset_with_multiple_grouping(request):
     groups = np.tile(
         # 4x2 array, repeated until it fits
         np.array([[0, 0], [0, 1], [1, 0], [1, 1]]),
-        reps=((X.shape[0] + 3) // 4, 1)
-    )[:X.shape[0], :]
+        reps=((X.shape[0] + 3) // 4, 1),
+    )[: X.shape[0], :]
     X_with_groups = np.concatenate([groups, X], axis=1)
 
     grouper = (0, 1)
@@ -84,6 +90,7 @@ def multiple_obs_fitter():
 
     class MultipleObsFitter(BaseEstimator, TransformerMixin):
         """A transformer that needs more than 1 value to fit"""
+
         def fit(self, X, y=None):
             if len(X) <= 1:
                 raise ValueError("Need more than 1 value to fit")
@@ -97,16 +104,15 @@ def multiple_obs_fitter():
 
 
 @pytest.fixture(scope="module")
-def penguins_df():
-    df = load_penguins(as_frame=True).dropna()
-    X = df.drop(columns='species')
-
+def penguins_df() -> pd.DataFrame:
+    df: pd.DataFrame = load_penguins(as_frame=True)
+    X = df.dropna().drop(columns="species")
     return X
 
 
 @pytest.fixture(scope="module")
-def penguins(penguins_df):
-    return penguins_df.values
+def penguins(penguins_df: pd.DataFrame) -> np.ndarray:
+    return penguins_df.to_numpy()
 
 
 def test_all_groups_scaled(dataset_with_single_grouping, scaling_range):
@@ -132,11 +138,14 @@ def test_group_correlation_minmaxscaler(dataset_with_single_grouping, scaling_ra
     # For each column, check that all grouped correlations are 1 (because MinMaxScaler scales linear)
     for col in range(X.shape[1]):
         assert (
-            pd.concat([
-                pd.Series(groups.flatten(), name="group"),
-                pd.Series(X[:, col], name="original"),
-                pd.Series(transformed[:, col], name="transformed"),
-            ], axis=1)
+            pd.concat(
+                [
+                    pd.Series(groups.flatten(), name="group"),
+                    pd.Series(X[:, col], name="original"),
+                    pd.Series(transformed[:, col], name="transformed"),
+                ],
+                axis=1,
+            )
             .groupby("group")
             .corr()
             .pipe(np.allclose, 1)
@@ -162,6 +171,7 @@ def test_get_params():
         "transformer": trf,
         "groups": 0,
         "use_global_model": True,
+        "check_X": True,
     }
 
 
@@ -183,14 +193,11 @@ def test_multiple_grouping_columns(dataset_with_multiple_grouping, scaling_range
     transformer = GroupedTransformer(trf, groups=grouper)
     transformed = transformer.fit(X_with_groups, y).transform(X_with_groups)
 
-    df_with_groups = pd.concat([
-        pd.DataFrame(groups, columns=["A", "B"]),
-        pd.DataFrame(transformed)
-    ], axis=1)
+    df_with_groups = pd.concat([pd.DataFrame(groups, columns=["A", "B"]), pd.DataFrame(transformed)], axis=1)
 
     assert np.allclose(df_with_groups.groupby(["A", "B"]).min(), scaling_range[0])
 
-    # If a group has a single element, it defaults to min, so check wether all maxes are one of the bounds
+    # If a group has a single element, it defaults to min, so check whether all maxes are one of the bounds
     maxes = df_with_groups.groupby(["A", "B"]).max()
     assert np.all(
         np.isclose(maxes, scaling_range[1]) | np.isclose(maxes, scaling_range[0])
@@ -206,9 +213,7 @@ def test_missing_groups_transform_global(dataset_with_single_grouping, scaling_r
     transformer.fit(X_with_groups, y)
 
     # Array with 2 rows, first column a new group. Remaining top are out of range so should be the range
-    X_test = np.concatenate([
-        np.array([[3], [3]]), np.stack([X.min(axis=0), X.max(axis=0)], axis=0)
-    ], axis=1)
+    X_test = np.concatenate([np.array([[3], [3]]), np.stack([X.min(axis=0), X.max(axis=0)], axis=0)], axis=1)
 
     transformed = transformer.transform(X_test)
 
@@ -225,20 +230,20 @@ def test_missing_groups_transform_noglobal(dataset_with_single_grouping, scaling
     transformer.fit(X_with_groups, y)
 
     # Array with 2 rows, first column a new group. Remaining top are out of range so should be the range
-    X_test = np.concatenate([
-        np.array([[3], [3]]), np.stack([X.min(axis=0) - 1, X.max(axis=0) + 1], axis=0)
-    ], axis=1)
+    X_test = np.concatenate([np.array([[3], [3]]), np.stack([X.min(axis=0) - 1, X.max(axis=0) + 1], axis=0)], axis=1)
 
     with pytest.raises(ValueError):
         transformer.transform(X_test)
 
 
 def test_exception_in_group(multiple_obs_fitter):
-    X = np.array([
-        [1, 2],
-        [1, 0],
-        [2, 1],
-    ])
+    X = np.array(
+        [
+            [1, 2],
+            [1, 0],
+            [2, 1],
+        ]
+    )
 
     # Only works on groups greater than 1, so will raise an error in group 2
     transformer = GroupedTransformer(multiple_obs_fitter, groups=0, use_global_model=False)
@@ -250,19 +255,24 @@ def test_exception_in_group(multiple_obs_fitter):
 
 
 def test_array_with_strings():
-    X = np.array([
-        ("group0", 2),
-        ("group0", 0),
-        ("group1", 1),
-        ("group1", 3),
-    ], dtype='object')
+    X = np.array(
+        [
+            ("group0", 2),
+            ("group0", 0),
+            ("group1", 1),
+            ("group1", 3),
+        ],
+        dtype="object",
+    )
 
     trf = MinMaxScaler()
     transformer = GroupedTransformer(trf, groups=0, use_global_model=False)
     transformer.fit_transform(X)
 
 
-def test_df(penguins_df):
+@pytest.mark.parametrize("frame_func", [pd.DataFrame, pl.DataFrame, pa.table])
+def test_df(penguins_df: pd.DataFrame, frame_func):
+    penguins_df = frame_func(penguins_df.to_dict(orient="list"))
     meta = GroupedTransformer(StandardScaler(), groups=["island", "sex"])
 
     transformed = meta.fit_transform(penguins_df)
@@ -271,20 +281,21 @@ def test_df(penguins_df):
     assert transformed.shape == (penguins_df.shape[0], penguins_df.shape[1] - 2)
 
 
-def test_df_missing_group(penguins_df):
+@pytest.mark.parametrize("frame_func", [pd.DataFrame, pl.DataFrame, pa.table])
+def test_df_missing_group(penguins_df: pd.DataFrame, frame_func):
     meta = GroupedTransformer(StandardScaler(), groups=["island", "sex"])
 
     # Otherwise the fixture is changed
-    X = penguins_df.copy()
-    X.loc[0, "island"] = None
-
+    X = penguins_df.copy().to_dict(orient="list")
+    X["island"][0] = None
     with pytest.raises(ValueError):
-        meta.fit_transform(X)
+        meta.fit_transform(frame_func(X))
 
 
-def test_array_with_multiple_string_cols(penguins):
+def test_array_with_multiple_string_cols(penguins: np.ndarray):
     X = penguins
 
+    # BROKEN: Failing due to negative indexing... kind of an edge case
     meta = GroupedTransformer(StandardScaler(), groups=[0, -1])
 
     transformed = meta.fit_transform(X)
@@ -303,16 +314,20 @@ def test_grouping_column_not_in_array(penguins):
         meta.fit_transform(X[:, :3])
 
 
-def test_grouping_column_not_in_df(penguins_df):
+@pytest.mark.parametrize("frame_func", [pd.DataFrame, pl.DataFrame, pa.table])
+def test_grouping_column_not_in_df(penguins_df: pd.DataFrame, frame_func):
     meta = GroupedTransformer(StandardScaler(), groups=["island", "unexisting_column"])
 
     # This should raise ValueError
     with pytest.raises(ValueError):
-        meta.fit_transform(penguins_df)
+        meta.fit_transform(frame_func(penguins_df.to_dict(orient="list")))
 
 
-def test_no_grouping(penguins_df):
-    penguins_numeric = penguins_df[["bill_length_mm", "bill_depth_mm", "flipper_length_mm", "body_mass_g"]]
+@pytest.mark.parametrize("frame_func", [pd.DataFrame, pl.DataFrame, pa.table])
+def test_no_grouping(penguins_df: pd.DataFrame, frame_func):
+    penguins_numeric = frame_func(
+        penguins_df[["bill_length_mm", "bill_depth_mm", "flipper_length_mm", "body_mass_g"]].to_dict(orient="list")
+    )
 
     meta = GroupedTransformer(StandardScaler(), groups=None)
     nonmeta = StandardScaler()
@@ -320,9 +335,10 @@ def test_no_grouping(penguins_df):
     assert (meta.fit_transform(penguins_numeric) == nonmeta.fit_transform(penguins_numeric)).all()
 
 
-def test_with_y(penguins_df):
-    X = penguins_df.drop(columns=["sex"])
-    y = penguins_df["sex"]
+@pytest.mark.parametrize("frame_func", [pd.DataFrame, pl.DataFrame, pa.table])
+def test_with_y(penguins_df: pd.DataFrame, frame_func):
+    X = frame_func(penguins_df.drop(columns=["sex"]).to_dict(orient="list"))
+    y = penguins_df["sex"].to_numpy()
 
     meta = GroupedTransformer(StandardScaler(), groups="island")
 
@@ -331,3 +347,99 @@ def test_with_y(penguins_df):
 
     # 1 column for grouping not in the result
     assert transformed.shape == (X.shape[0], X.shape[1] - 1)
+
+
+@pytest.mark.parametrize(
+    "transformer",
+    (
+        TargetEncoder(target_type="continuous", random_state=123),
+        Pipeline(
+            [("encoder", TargetEncoder(target_type="continuous", random_state=123)), ("scaler", StandardScaler())]
+        ),
+        Pipeline(
+            [("scaler", StandardScaler()), ("encoder", TargetEncoder(target_type="continuous", random_state=123))]
+        ),
+    ),
+)
+def test_transform_with_y(transformer):
+    """Test that the GroupedTransformer works with a transformer that requires y."""
+
+    df_heroes = (
+        load_heroes(as_frame=True)
+        .drop(columns="name")
+        .replace([np.inf, -np.inf], np.nan)
+        .dropna()
+        .assign(role=lambda t: LabelEncoder().fit_transform(t["role"]))
+    )
+
+    target, groups, features = "attack", "attack_type", ["role"]
+    X, y = df_heroes.drop(columns=target), df_heroes[target]
+
+    is_melee = X[groups] == "Melee"
+
+    X_melee = (
+        clone(transformer)
+        .set_output(transform="pandas")
+        .fit(X.loc[is_melee, features], y.loc[is_melee])
+        .transform(X.loc[is_melee, features])
+    )
+    X_ranged = (
+        clone(transformer)
+        .set_output(transform="pandas")
+        .fit(X.loc[~is_melee, features], y.loc[~is_melee])
+        .transform(X.loc[~is_melee, features])
+    )
+
+    X_naive = pd.concat([X_melee, X_ranged]).sort_index()
+    X_grouped = (
+        GroupedTransformer(clone(transformer), groups=groups, check_X=False)
+        .fit(X.loc[:, [groups] + features], y)
+        .transform(X.loc[:, [groups] + features])
+    )
+
+    assert np.allclose(X_naive.to_numpy(), X_grouped)
+
+
+@pytest.mark.parametrize(("frame_func", "transform_output"), [(pd.DataFrame, "pandas"), (pl.DataFrame, "polars")])
+def test_set_output(penguins_df: pd.DataFrame, frame_func, transform_output):
+    if transform_output == "polars" and sklearn.__version__ < "1.4.0":
+        pytest.skip()
+
+    X = frame_func(penguins_df.drop(columns=["sex"]))
+    y = penguins_df["sex"]
+
+    meta = GroupedTransformer(StandardScaler(), groups="island").set_output(transform=transform_output)
+    transformed = meta.fit_transform(X, y)
+    assert isinstance(transformed, frame_func)
+
+
+def test_with_object_dtype():
+    # Example from https://github.com/koaning/scikit-lego/issues/740
+
+    data = {
+        "big": ["A", "A", "A", "A", "A", "B", "B", "B", "C", "C"],
+        "small": ["a", "a", pd.NA, "a", "a", "b", "b", pd.NA, "C", "C"],
+        "other": [0.1, 0.2, 0.3, 0.6, 0.5, 0.1, 0.3, 0.5, 0.6, 0.6],
+        "y": [1, 1, 0, 1, 0, 1, 1, 0, 0, 0],
+    }
+    df = pd.DataFrame(data=data)
+    X, y = df.drop(columns=["y"]), df["y"]
+
+    result = (
+        GroupedTransformer(
+            transformer=SimpleImputer(strategy="most_frequent", missing_values=pd.NA),
+            groups=["big"],
+            check_X=False,
+        )
+        .set_output(transform="pandas")
+        .fit_transform(X, y)
+    )
+
+    expected = pd.DataFrame(
+        {
+            "small": ["a", "a", "a", "a", "a", "b", "b", "b", "C", "C"],
+            "other": [0.1, 0.2, 0.3, 0.6, 0.5, 0.1, 0.3, 0.5, 0.6, 0.6],
+        }
+    )
+
+    assert_frame_equal(result, expected, check_dtype=False)

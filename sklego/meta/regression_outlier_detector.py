@@ -1,18 +1,22 @@
+import narwhals.stable.v1 as nw
 import numpy as np
-import pandas as pd
+from sklearn import clone
 from sklearn.base import BaseEstimator, OutlierMixin
-from sklearn.utils.validation import check_array, check_is_fitted
+from sklearn.utils.validation import check_is_fitted
+from sklearn_compat.utils.validation import validate_data
 
 
-class RegressionOutlierDetector(BaseEstimator, OutlierMixin):
+class RegressionOutlierDetector(OutlierMixin, BaseEstimator):
     """Morphs a regression estimator into one that can detect outliers. We will try to predict `column` in X.
 
     Parameters
     ----------
     model : scikit-learn compatible regression model
         A regression model that will be used for prediction.
-    column : int
-        The index of the target column to predict in the input data.
+    column : int | str
+        This should be:
+            - The index of the target column to predict in the input data, when the input is an array.
+            - The name of the target column to predict in the input data, when the input is a dataframe.
     lower : float, default=2.0
         Lower threshold for outlier detection. The method used for detection depends on the `method` parameter.
     upper : float, default=2.0
@@ -32,7 +36,55 @@ class RegressionOutlierDetector(BaseEstimator, OutlierMixin):
         The standard deviation of the differences between true and predicted values.
     idx_ : int
         The index of the target column in the input data.
+
+    Notes
+    -----
+    Native cross-dataframe support is achieved using
+    [Narwhals](https://narwhals-dev.github.io/narwhals/){:target="_blank"}.
+    Supported dataframes are:
+
+    - pandas
+    - Polars (eager)
+    - Modin
+
+    See [Narwhals docs](https://narwhals-dev.github.io/narwhals/extending/){:target="_blank"} for an up-to-date list
+    (and to learn how you can add your dataframe library to it!), though note that only those
+    supported by [sklearn.utils.check_X_y](https://scikit-learn.org/stable/modules/generated/sklearn.utils.check_X_y.html)
+    will work with this class.
+
+    Example
+    -------
+
+    ```py
+    import numpy as np
+    from sklearn.linear_model import LinearRegression
+    from sklego.meta import RegressionOutlierDetector
+
+    np.random.seed(0)
+    n1, n2 = 30, 5
+    X = np.random.normal(0, 1, (n1+n2, 2))
+    y = np.concatenate([np.random.normal(0, 0.5, (n1, 1)), np.random.normal(5, 1, (n2,1))], axis=0)
+    data = np.concatenate([X, y], axis=1)
+
+    col = 2
+
+    # Initialize the outlier detector - outliers are points predicted more that +/-1 sd from mean
+    linear_regressor = LinearRegression()
+    outlier_detector = RegressionOutlierDetector(linear_regressor, col, lower=1, upper=1)
+
+    outlier_detector.fit(data)
+    preds = outlier_detector.predict(data)
+    scores = outlier_detector.decision_function(data)
+
+    print(preds)
+    ### The last 5 points are outliers, as expected
+    ### [ 1  1  1  1  1  1  1  1  1  1 -1  1  1  1  1  1  1  1  1  1 -1  1  1  1 1  1  1  1  1  1 -1 -1 -1 -1 -1]
+    ```
     """
+
+    _ALLOWED_METHODS = ("sd", "relative", "absolute")
+
+    _required_parameters = ["model", "column"]
 
     def __init__(self, model, column, lower=2, upper=2, method="sd"):
         self.model = model
@@ -49,9 +101,8 @@ class RegressionOutlierDetector(BaseEstimator, OutlierMixin):
         """Compute if a sample is an outlier based on the `method` parameter."""
         difference = y_true - y_pred
         results = np.ones(difference.shape, dtype=int)
-        allowed_methods = ["sd", "relative", "absolute"]
-        if self.method not in allowed_methods:
-            ValueError(f"`method` must be in {allowed_methods} got: {self.method}")
+        if self.method not in self._ALLOWED_METHODS:
+            raise ValueError(f"`method` must be in {self._ALLOWED_METHODS} got: {self.method}")
         if self.method == "sd":
             lower_limit_hit = -self.lower * self.sd_ > difference
             upper_limit_hit = self.upper * self.sd_ < difference
@@ -112,13 +163,17 @@ class RegressionOutlierDetector(BaseEstimator, OutlierMixin):
         ValueError
             If the `model` is not a regression estimator.
         """
-        self.idx_ = np.argmax([i == self.column for i in X.columns]) if isinstance(X, pd.DataFrame) else self.column
-        X = check_array(X, estimator=self)
+        X = nw.from_native(X, eager_only=True, strict=False)
+        self.idx_ = np.argmax([i == self.column for i in X.columns]) if isinstance(X, nw.DataFrame) else self.column
+        X = validate_data(self, X=nw.to_native(X, strict=False), reset=True)
+
         if not self._is_regression_model():
             raise ValueError("Passed model must be regression!")
         X, y = self.to_x_y(X)
-        self.estimator_ = self.model.fit(X, y)
+        self.estimator_ = clone(self.model).fit(X, y)
         self.sd_ = np.std(self.estimator_.predict(X) - y)
+        self.offset_ = 0
+
         return self
 
     def predict(self, X, y=None):
@@ -137,7 +192,8 @@ class RegressionOutlierDetector(BaseEstimator, OutlierMixin):
             The predicted values. 1 for inliers, -1 for outliers.
         """
         check_is_fitted(self, ["estimator_", "sd_", "idx_"])
-        X = check_array(X, estimator=self)
+        X = validate_data(self, X=X, reset=False)
+
         X, y = self.to_x_y(X)
         preds = self.estimator_.predict(X)
         return self._handle_thresholds(y, preds)
@@ -163,16 +219,19 @@ class RegressionOutlierDetector(BaseEstimator, OutlierMixin):
             If `method` is not one of "sd", "relative", or "absolute".
         """
         check_is_fitted(self, ["estimator_", "sd_", "idx_"])
-        X = check_array(X, estimator=self)
+        X = validate_data(self, X=X, reset=False)
+
         X, y_true = self.to_x_y(X)
         y_pred = self.estimator_.predict(X)
         difference = y_true - y_pred
-        allowed_methods = ["sd", "relative", "absolute"]
-        if self.method not in allowed_methods:
-            ValueError(f"`method` must be in {allowed_methods} got: {self.method}")
+        if self.method not in self._ALLOWED_METHODS:
+            raise ValueError(f"`method` must be in {self._ALLOWED_METHODS} got: {self.method}")
         if self.method == "sd":
             return difference
         if self.method == "relative":
             return difference / y_true
         if self.method == "absolute":
             return difference
+
+    def decision_function(self, X):
+        return self.score_samples(X) - self.offset_

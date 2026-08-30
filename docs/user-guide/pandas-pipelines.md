@@ -24,7 +24,7 @@ A mitigation for this is to add _decorators_ to your pipeline functions that log
 
 ## Logging in method chaining
 
-In order to use the logging capabilitites we first need to ensure we have a proper logger configured. We do this by running
+In order to use the logging capabilities we first need to ensure we have a proper logger configured. We do this by running
 
 ```py
 --8<-- "docs/_scripts/pandas-pipelines.py:log-setup"
@@ -122,6 +122,6 @@ For example, if we want to log some arbitrary message and the number of unique c
 224     125     8     21     2
 ```
 
-[log-step-api]: /api/pandas_pipeline#sklego.pandas_utils.log_step
-[log-step-extra-api]: /api/pandas_pipeline#sklego.pandas_utils.log_step_extra
+[log-step-api]: ../../api/pandas_pipeline#sklego.pandas_utils.log_step
+[log-step-extra-api]: ../../api/pandas_pipeline#sklego.pandas_utils.log_step_extra
 [method-chaining]: https://tomaugspurger.net/posts/method-chaining/

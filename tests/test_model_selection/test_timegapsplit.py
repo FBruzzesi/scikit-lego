@@ -1,14 +1,16 @@
-import pandas as pd
+from datetime import datetime, timedelta
+
 import numpy as np
-from datetime import timedelta
-import datetime
-
+import pandas as pd
+import polars as pl
 import pytest
-from sklego.model_selection import TimeGapSplit
-from sklearn.pipeline import Pipeline
-from sklearn.model_selection import GridSearchCV
+from pandas.testing import assert_frame_equal as pandas_assert_frame_equal
+from polars.testing import assert_frame_equal as polars_assert_frame_equal
 from sklearn.linear_model import Lasso
+from sklearn.model_selection import GridSearchCV
+from sklearn.pipeline import Pipeline
 
+from sklego.model_selection import TimeGapSplit, _timedelta_to_freqstr
 
 df = pd.DataFrame(np.random.randint(0, 30, size=(30, 4)), columns=list("ABCy"))
 df["date"] = pd.date_range(start="1/1/2018", end="1/30/2018")[::-1]
@@ -21,63 +23,157 @@ X_train = train[["A", "B", "C"]]
 y_train = train["y"]
 
 
-def test_timegapsplit():
+@pytest.mark.parametrize(
+    ("stride_duration", "expected"),
+    [
+        (
+            3,
+            [
+                (np.array([0, 1, 2, 3, 4]), np.array([5, 6, 7])),
+                (np.array([3, 4, 5, 6, 7]), np.array([8, 9, 10])),
+                (np.array([6, 7, 8, 9, 10]), np.array([11, 12, 13])),
+                (np.array([9, 10, 11, 12, 13]), np.array([14, 15, 16])),
+                (np.array([12, 13, 14, 15, 16]), np.array([17, 18, 19])),
+                (np.array([15, 16, 17, 18, 19]), np.array([20, 21, 22])),
+            ],
+        ),
+        (
+            2,
+            [
+                (np.array([0, 1, 2, 3, 4]), np.array([5, 6, 7])),
+                (np.array([2, 3, 4, 5, 6]), np.array([7, 8, 9])),
+                (np.array([4, 5, 6, 7, 8]), np.array([9, 10, 11])),
+                (np.array([6, 7, 8, 9, 10]), np.array([11, 12, 13])),
+                (np.array([8, 9, 10, 11, 12]), np.array([13, 14, 15])),
+                (np.array([10, 11, 12, 13, 14]), np.array([15, 16, 17])),
+                (np.array([12, 13, 14, 15, 16]), np.array([17, 18, 19])),
+                (np.array([14, 15, 16, 17, 18]), np.array([19, 20, 21])),
+                (np.array([16, 17, 18, 19, 20]), np.array([21, 22, 23])),
+            ],
+        ),
+    ],
+)
+def test_timegapsplit(stride_duration, expected):
     cv = TimeGapSplit(
-        date_serie=df["date"],
+        date_series=df["date"],
         train_duration=timedelta(days=5),
         valid_duration=timedelta(days=3),
+        stride_duration=timedelta(days=stride_duration),
         gap_duration=timedelta(days=0),
     )
 
-    for i, indices in enumerate(cv.split(X_train, y_train)):
-        train_mindate = df.loc[X_train.iloc[indices[0]].index]["date"].min()
-        train_maxdate = df.loc[X_train.iloc[indices[0]].index]["date"].max()
-        valid_mindate = df.loc[X_train.iloc[indices[1]].index]["date"].min()
-        valid_maxdate = df.loc[X_train.iloc[indices[1]].index]["date"].max()
+    for result_indices, expected_indices in zip(list(cv.split(X_train, y_train)), expected):
+        np.testing.assert_array_equal(result_indices[0], expected_indices[0])
+        np.testing.assert_array_equal(result_indices[1], expected_indices[1])
 
-        assert train_mindate <= train_maxdate <= valid_mindate <= valid_maxdate
-
-    # regression testing, check if output changes of the last fold
-    assert train_mindate == datetime.datetime.strptime(
-        "2018-01-16", "%Y-%m-%d")
-    assert train_maxdate == datetime.datetime.strptime(
-        "2018-01-20", "%Y-%m-%d")
-    assert valid_mindate == datetime.datetime.strptime(
-        "2018-01-21", "%Y-%m-%d")
-    assert valid_maxdate == datetime.datetime.strptime(
-        "2018-01-23", "%Y-%m-%d")
+    # Polars doesn't have an index, so this class behaves a bit differenly for
+    # index-less objects. We need to first ensure that `date_series`, `X_train`,
+    # and `y_train` all have the same length.
+    date_series = df["date"].loc[X_train.index]
+    cv = TimeGapSplit(
+        date_series=pl.from_pandas(date_series),
+        train_duration=timedelta(days=5),
+        valid_duration=timedelta(days=3),
+        stride_duration=timedelta(days=stride_duration),
+        gap_duration=timedelta(days=0),
+    )
+    for result_indices, expected_indices in zip(
+        list(cv.split(pl.from_pandas(X_train), pl.from_pandas(y_train))), expected
+    ):
+        np.testing.assert_array_equal(result_indices[0], expected_indices[0])
+        np.testing.assert_array_equal(result_indices[1], expected_indices[1])
 
 
 def test_timegapsplit_too_big_gap():
     try:
         TimeGapSplit(
-            date_serie=df["date"],
+            date_series=df["date"],
             train_duration=timedelta(days=5),
             valid_duration=timedelta(days=3),
             gap_duration=timedelta(days=5),
         )
     except ValueError:
-        print("Successfully failed")
+        print("Successfully failed")  # noqa: T201
+
+
+def test_timegapsplit_accepts_date_series_alias():
+    cv_with_alias = TimeGapSplit(
+        date_series=df["date"],
+        train_duration=timedelta(days=5),
+        valid_duration=timedelta(days=3),
+        gap_duration=timedelta(days=0),
+    )
+    with pytest.warns(
+        DeprecationWarning,
+        match="Please use `date_series` instead of `date_serie`, `date_serie` will be deprecated in future versions",
+    ):
+        cv_with_legacy_name = TimeGapSplit(
+            date_serie=df["date"],
+            train_duration=timedelta(days=5),
+            valid_duration=timedelta(days=3),
+            gap_duration=timedelta(days=0),
+        )
+
+    alias_splits = list(cv_with_alias.split(X_train, y_train))
+    legacy_splits = list(cv_with_legacy_name.split(X_train, y_train))
+
+    assert len(alias_splits) == len(legacy_splits)
+    for alias_split, legacy_split in zip(alias_splits, legacy_splits):
+        np.testing.assert_array_equal(alias_split[0], legacy_split[0])
+        np.testing.assert_array_equal(alias_split[1], legacy_split[1])
+
+
+def test_timegapsplit_warns_on_date_serie_legacy_alias():
+    with pytest.warns(
+        DeprecationWarning,
+        match="Please use `date_series` instead of `date_serie`, `date_serie` will be deprecated in future versions",
+    ):
+        _ = TimeGapSplit(
+            date_serie=df["date"],
+            train_duration=timedelta(days=5),
+            valid_duration=timedelta(days=3),
+            gap_duration=timedelta(days=0),
+        )
+
+
+def test_timegapsplit_rejects_both_date_series_and_date_serie():
+    with pytest.raises(ValueError, match="Cannot provide both `date_series` and `date_serie`"):
+        _ = TimeGapSplit(
+            date_series=df["date"],
+            date_serie=df["date"],
+            train_duration=timedelta(days=5),
+            valid_duration=timedelta(days=3),
+            gap_duration=timedelta(days=0),
+        )
+
+
+def test_timegapsplit_rejects_missing_date_series_argument():
+    with pytest.raises(ValueError, match="`date_series` cannot be None"):
+        _ = TimeGapSplit(
+            train_duration=timedelta(days=5),
+            valid_duration=timedelta(days=3),
+            gap_duration=timedelta(days=0),
+        )
 
 
 def test_timegapsplit_using_splits():
     cv = TimeGapSplit(
-        date_serie=df["date"],
+        date_series=df["date"],
         train_duration=timedelta(days=5),
         valid_duration=timedelta(days=3),
         gap_duration=timedelta(days=1),
-        n_splits=3
+        n_splits=3,
     )
     assert len(list(cv.split(X_train, y_train))) == 3
 
 
 def test_timegapsplit_too_many_splits():
     cv = TimeGapSplit(
-        date_serie=df["date"],
+        date_series=df["date"],
         train_duration=timedelta(days=5),
         valid_duration=timedelta(days=3),
         gap_duration=timedelta(days=1),
-        n_splits=7
+        n_splits=7,
     )
     with pytest.raises(ValueError):
         list(cv.split(X_train, y_train))
@@ -86,21 +182,21 @@ def test_timegapsplit_too_many_splits():
 def test_timegapsplit_train_or_nsplit():
     with pytest.raises(ValueError):
         _ = TimeGapSplit(
-            date_serie=df["date"],
+            date_series=df["date"],
             train_duration=None,
             valid_duration=timedelta(days=3),
             gap_duration=timedelta(days=5),
-            n_splits=None
+            n_splits=None,
         )
 
 
 def test_timegapsplit_without_train_duration():
     cv = TimeGapSplit(
-        date_serie=df["date"],
+        date_series=df["date"],
         train_duration=None,
         valid_duration=timedelta(days=3),
         gap_duration=timedelta(days=5),
-        n_splits=3
+        n_splits=3,
     )
     csv = list(cv.split(X_train, y_train))
 
@@ -111,7 +207,7 @@ def test_timegapsplit_without_train_duration():
 def test_timegapsplit_with_a_gap():
     gap_duration = timedelta(days=2)
     cv_gap = TimeGapSplit(
-        date_serie=df["date"],
+        date_series=df["date"],
         train_duration=timedelta(days=5),
         valid_duration=timedelta(days=3),
         gap_duration=gap_duration,
@@ -127,10 +223,53 @@ def test_timegapsplit_with_a_gap():
         assert valid_mindate - train_maxdate >= gap_duration
 
 
-def test_timegapsplit_with_gridsearch():
+def test_timegapsplit_stride_is_zero():
+    with pytest.raises(ValueError):
+        _ = TimeGapSplit(
+            date_series=df["date"],
+            train_duration=timedelta(days=5),
+            stride_duration=timedelta(days=0),
+            valid_duration=timedelta(days=3),
+            gap_duration=timedelta(days=5),
+            n_splits=None,
+        )
 
+
+def test_timegapsplit_stride_longer_than_train():
+    with pytest.raises(ValueError):
+        _ = TimeGapSplit(
+            date_series=df["date"],
+            train_duration=timedelta(days=5),
+            stride_duration=timedelta(days=6),
+            valid_duration=timedelta(days=3),
+            gap_duration=timedelta(days=5),
+            n_splits=None,
+        )
+
+
+def test_timegapsplit_with_stride():
+    stride_duration = timedelta(days=2)
+    cv_gap = TimeGapSplit(
+        date_series=df["date"],
+        train_duration=timedelta(days=5),
+        stride_duration=stride_duration,
+        valid_duration=timedelta(days=3),
+        gap_duration=timedelta(days=1),
+    )
+
+    for i, indices in enumerate(cv_gap.split(X_train, y_train)):
+        train_mindate = df.loc[X_train.iloc[indices[0]].index]["date"].min()
+        train_maxdate = df.loc[X_train.iloc[indices[0]].index]["date"].max()
+        valid_mindate = df.loc[X_train.iloc[indices[1]].index]["date"].min()
+        valid_maxdate = df.loc[X_train.iloc[indices[1]].index]["date"].max()
+
+        assert train_mindate <= train_maxdate <= valid_mindate <= valid_maxdate
+        assert valid_mindate - train_maxdate >= stride_duration
+
+
+def test_timegapsplit_with_gridsearch():
     cv = TimeGapSplit(
-        date_serie=df["date"],
+        date_series=df["date"],
         train_duration=timedelta(days=5),
         valid_duration=timedelta(days=3),
         gap_duration=timedelta(days=0),
@@ -147,15 +286,133 @@ def test_timegapsplit_with_gridsearch():
     assert best_C
 
 
-def test_timegapsplit_summary():
+@pytest.mark.parametrize(
+    ("delta", "expected"),
+    [
+        (pd.Timedelta(days=1), "24h"),
+        (pd.Timedelta(days=2), "48h"),
+        (pd.Timedelta(days=1, hours=12), "36h"),
+        (pd.Timedelta(hours=1), "h"),
+        (pd.Timedelta(hours=3), "3h"),
+        (pd.Timedelta(minutes=90), "90min"),
+        (pd.Timedelta(seconds=30), "30s"),
+        (pd.Timedelta(milliseconds=1500), "1500ms"),
+        (pd.Timedelta(microseconds=1), "us"),
+        (pd.Timedelta(0), "0h"),
+        (pd.Timedelta(days=-1), "-24h"),
+    ],
+)
+def test_timedelta_to_freqstr(delta: pd.Timedelta, expected: str) -> None:
+    """Offset aliases must not depend on the pandas version.
 
+    These are the pandas 3 renderings. `pd.tseries.frequencies.to_offset` produced `"D"` for whole
+    days before pandas 3.0, and the legacy uppercase `"H"`/`"T"`/`"S"` aliases before pandas 2.2.
+    """
+    assert _timedelta_to_freqstr(delta) == expected
+
+
+def test_timegapsplit_summary():
     cv = TimeGapSplit(
-        date_serie=df["date"],
+        date_series=df["date"],
         train_duration=timedelta(days=5),
         valid_duration=timedelta(days=3),
         gap_duration=timedelta(days=0),
     )
 
     summary = cv.summary(X_train)
+    assert summary.shape == (12, 6)
 
-    assert summary.shape == (12, 5)
+    expected_data = {
+        "Start date": [
+            datetime(2018, 1, 1, 0, 0),
+            datetime(2018, 1, 6, 0, 0),
+            datetime(2018, 1, 4, 0, 0),
+            datetime(2018, 1, 9, 0, 0),
+            datetime(2018, 1, 7, 0, 0),
+            datetime(2018, 1, 12, 0, 0),
+            datetime(2018, 1, 10, 0, 0),
+            datetime(2018, 1, 15, 0, 0),
+            datetime(2018, 1, 13, 0, 0),
+            datetime(2018, 1, 18, 0, 0),
+            datetime(2018, 1, 16, 0, 0),
+            datetime(2018, 1, 21, 0, 0),
+        ],
+        "End date": [
+            datetime(2018, 1, 5, 0, 0),
+            datetime(2018, 1, 8, 0, 0),
+            datetime(2018, 1, 8, 0, 0),
+            datetime(2018, 1, 11, 0, 0),
+            datetime(2018, 1, 11, 0, 0),
+            datetime(2018, 1, 14, 0, 0),
+            datetime(2018, 1, 14, 0, 0),
+            datetime(2018, 1, 17, 0, 0),
+            datetime(2018, 1, 17, 0, 0),
+            datetime(2018, 1, 20, 0, 0),
+            datetime(2018, 1, 20, 0, 0),
+            datetime(2018, 1, 23, 0, 0),
+        ],
+        "Period": [
+            timedelta(days=4),
+            timedelta(days=2),
+            timedelta(days=4),
+            timedelta(days=2),
+            timedelta(days=4),
+            timedelta(days=2),
+            timedelta(days=4),
+            timedelta(days=2),
+            timedelta(days=4),
+            timedelta(days=2),
+            timedelta(days=4),
+            timedelta(days=2),
+        ],
+        "frequency": ["24h"] * 12,
+        "Unique days": [5, 3, 5, 3, 5, 3, 5, 3, 5, 3, 5, 3],
+        "nbr samples": [5, 3, 5, 3, 5, 3, 5, 3, 5, 3, 5, 3],
+        "part": [
+            "train",
+            "valid",
+            "train",
+            "valid",
+            "train",
+            "valid",
+            "train",
+            "valid",
+            "train",
+            "valid",
+            "train",
+            "valid",
+        ],
+        "fold": [0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5],
+    }
+    expected = pd.DataFrame(expected_data).set_index(["fold", "part"])
+    pandas_assert_frame_equal(summary, expected)
+
+    # Polars doesn't have an index, so this class behaves a bit differently for
+    # index-less objects. We need to ensure that `date_series` and `X_train` have
+    # the same length.
+    date_series = df["date"].loc[X_train.index]
+    cv = TimeGapSplit(
+        date_series=pl.from_pandas(date_series),
+        train_duration=timedelta(days=5),
+        valid_duration=timedelta(days=3),
+        gap_duration=timedelta(days=0),
+    )
+    summary = cv.summary(pl.from_pandas(X_train))
+
+    expected = pl.DataFrame(expected_data)
+    polars_assert_frame_equal(summary, expected)
+
+
+def test_timegapsplit_summary_non_hour_frequency():
+    dates = pd.Series(pd.date_range("2018-01-01", periods=13, freq="90min"))
+    X = pd.DataFrame({"x": range(len(dates))})
+    cv = TimeGapSplit(
+        date_series=dates,
+        train_duration=timedelta(hours=6),
+        valid_duration=timedelta(hours=3),
+        stride_duration=timedelta(hours=3),
+    )
+
+    summary = cv.summary(X)
+
+    assert set(summary["frequency"]) == {"90min"}

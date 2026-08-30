@@ -1,11 +1,9 @@
-from warnings import warn
-
 from sklearn.base import BaseEstimator, TransformerMixin
-from sklearn.utils import check_array
 from sklearn.utils.validation import check_is_fitted
+from sklearn_compat.utils.validation import _check_n_features, validate_data
 
 
-class IdentityTransformer(BaseEstimator, TransformerMixin):
+class IdentityTransformer(TransformerMixin, BaseEstimator):
     """The `IdentityTransformer` returns what it is fed. Does not apply any transformation.
 
     The reason for having it is because you can build more expressive pipelines.
@@ -24,6 +22,31 @@ class IdentityTransformer(BaseEstimator, TransformerMixin):
         The number of features seen during `fit`.
     shape_ : tuple[int, int]
         Deprecated, please use `n_samples_` and `n_features_in_` instead.
+
+    Examples
+    --------
+    ```py
+    import pandas as pd
+    from sklego.preprocessing import IdentityTransformer
+
+    df = pd.DataFrame({
+        "name": ["Swen", "Victor", "Alex"],
+        "length": [1.82, 1.85, 1.80],
+        "shoesize": [42, 44, 45]
+    })
+
+    IdentityTransformer().fit_transform(df)
+    #	name	length	shoesize
+    # 0	Swen	1.82	42
+    # 1	Victor	1.85	44
+    # 2	Alex	1.80	45
+
+    #using check_X=True to validate `X` to be non-empty 2D array of finite values and attempt to cast `X` to float
+    IdentityTransformer(check_X=True).fit_transform(df.drop(columns="name"))
+    # array([[ 1.82, 42.  ],
+    #        [ 1.85, 44.  ],
+    #        [ 1.8 , 45.  ]])
+    ```
     """
 
     def __init__(self, check_X: bool = False):
@@ -45,7 +68,9 @@ class IdentityTransformer(BaseEstimator, TransformerMixin):
             The fitted transformer.
         """
         if self.check_X:
-            X = check_array(X, copy=True, estimator=self)
+            X = validate_data(self, X=X, copy=True, reset=True)
+        else:
+            _check_n_features(self, X, reset=True)
         self.n_samples_, self.n_features_in_ = X.shape
         return self
 
@@ -67,13 +92,12 @@ class IdentityTransformer(BaseEstimator, TransformerMixin):
         ValueError
             If the number of columns from `X` differs from the number of columns when fitting.
         """
-        if self.check_X:
-            X = check_array(X, copy=True, estimator=self)
         check_is_fitted(self, "n_features_in_")
-        if X.shape[1] != self.n_features_in_:
-            raise ValueError(
-                f"Wrong shape is passed to transform. Trained on {self.n_features_in_} cols got {X.shape[1]}"
-            )
+
+        if self.check_X:
+            X = validate_data(self, X=X, copy=True, reset=False)
+        else:
+            _check_n_features(self, X, reset=False)
         return X
 
     @property

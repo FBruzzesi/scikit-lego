@@ -1,11 +1,13 @@
 import numpy as np
+from sklearn import clone
 from sklearn.base import BaseEstimator, ClassifierMixin, MetaEstimatorMixin
 from sklearn.metrics import confusion_matrix
 from sklearn.preprocessing import normalize
-from sklearn.utils.validation import FLOAT_DTYPES, check_array, check_is_fitted, check_X_y
+from sklearn.utils.validation import FLOAT_DTYPES, check_is_fitted
+from sklearn_compat.utils.validation import validate_data
 
 
-class SubjectiveClassifier(BaseEstimator, ClassifierMixin, MetaEstimatorMixin):
+class SubjectiveClassifier(ClassifierMixin, MetaEstimatorMixin, BaseEstimator):
     """Corrects predictions of the inner classifier by taking into account a (subjective) prior distribution of the
     classes.
 
@@ -30,7 +32,7 @@ class SubjectiveClassifier(BaseEstimator, ClassifierMixin, MetaEstimatorMixin):
     evidence : Literal["predict_proba", "confusion_matrix", "both"], default="both"
         A string indicating which evidence should be used to correct the inner estimator's predictions.
 
-        - If `"both"` the the inner estimator's `predict_proba()` results are multiplied by the posterior probabilities.
+        - If `"both"`  the inner estimator's `predict_proba()` results are multiplied by the posterior probabilities.
         - If `"predict_proba"`, the inner estimator's `predict_proba()` results are multiplied by the prior
             distribution.
         - If `"confusion_matrix"`, the inner estimator's discrete predictions are converted to posterior probabilities
@@ -44,7 +46,37 @@ class SubjectiveClassifier(BaseEstimator, ClassifierMixin, MetaEstimatorMixin):
         The classes labels.
     posterior_matrix_ : array-like, shape=(n_classes, n_classes)
         The posterior probabilities for each class, given the prediction of the inner classifier.
+
+    Example
+    -------
+    ```py
+    import numpy as np
+    from sklearn.linear_model import LogisticRegression
+    from sklego.meta import SubjectiveClassifier
+
+    np.random.seed(0)
+    n1, n2 = 50, 100
+    X = np.concatenate([np.random.normal(0, 1, (n1, 2)), np.random.normal(2, 1, (n2, 2))], axis=0)
+    y = np.concatenate([np.zeros((n1, 1)), np.ones((n2, 1))], axis=0).reshape(-1)
+
+    prior = {0: 0.2, 1: 0.8}
+
+    logistic_regressor = LogisticRegression()
+    subjective_classifier = SubjectiveClassifier(logistic_regressor, prior, evidence="confusion_matrix")
+    subjective_classifier.fit(X, y)
+
+    # Classify new datapoint
+
+    dp = np.random.normal(0, 1, (1,2)) # comes from the same distribution as datappints in class 0
+    pred_prob = subjective_classifier.predict_proba(dp)
+    preds = subjective_classifier.predict(dp)
+    print(f"Datapoint {dp[0]} with predicted probabilities: {pred_prob[0]}, is classified as belonging in class {preds[0]}")
+    ### Datapoint [-1.30652685  1.65813068] with predicted probabilities: [0.91836735 0.08163265], is classified as belonging in class 0.0
+    ```
     """
+
+    _ALLOWED_EVIDENCE = ("predict_proba", "confusion_matrix", "both")
+    _required_parameters = ["estimator", "prior"]
 
     def __init__(self, estimator, prior, evidence="both"):
         self.estimator = estimator
@@ -71,7 +103,7 @@ class SubjectiveClassifier(BaseEstimator, ClassifierMixin, MetaEstimatorMixin):
         )
 
     def fit(self, X, y):
-        """Fit the inner classfier using `X` and `y` as training data by fitting the underlying estimator and computing
+        """Fit the inner classifier using `X` and `y` as training data by fitting the underlying estimator and computing
         the posterior probabilities.
 
         Parameters
@@ -102,18 +134,18 @@ class SubjectiveClassifier(BaseEstimator, ClassifierMixin, MetaEstimatorMixin):
         if not np.isclose(sum(self.prior.values()), 1):
             raise ValueError("Invalid prior: the prior probabilities of all classes should sum to 1")
 
-        valid_evidence_types = ["predict_proba", "confusion_matrix", "both"]
-        if self.evidence not in valid_evidence_types:
-            raise ValueError(f"Invalid evidence: the provided evidence should be one of {valid_evidence_types}")
+        if self.evidence not in self._ALLOWED_EVIDENCE:
+            raise ValueError(f"Invalid evidence: the provided evidence should be one of {self._ALLOWED_EVIDENCE}")
 
-        X, y = check_X_y(X, y, estimator=self.estimator, dtype=FLOAT_DTYPES)
+        X, y = validate_data(self, X=X, y=y, dtype=FLOAT_DTYPES, reset=True)
+
         if set(y) - set(self.prior.keys()):
             raise ValueError(
                 f"Training data is inconsistent with prior: no prior defined for classes "
                 f"{set(y) - set(self.prior.keys())}"
             )
-        self.estimator.fit(X, y)
-        cfm = confusion_matrix(y, self.estimator.predict(X))
+        self.estimator_ = clone(self.estimator).fit(X, y)
+        cfm = confusion_matrix(y, self.estimator_.predict(X))
         self.posterior_matrix_ = np.array(
             [[self._posterior(y, y_hat, cfm) for y_hat in range(cfm.shape[0])] for y in range(cfm.shape[0])]
         )
@@ -143,8 +175,9 @@ class SubjectiveClassifier(BaseEstimator, ClassifierMixin, MetaEstimatorMixin):
             The predicted probabilities.
         """
         check_is_fitted(self, ["posterior_matrix_"])
-        X = check_array(X, estimator=self, dtype=FLOAT_DTYPES)
-        y_hats = self.estimator.predict_proba(X)  # these are ignorant of the prior
+        X = validate_data(self, X=X, dtype=FLOAT_DTYPES, reset=False)
+
+        y_hats = self.estimator_.predict_proba(X)  # these are ignorant of the prior
 
         if self.evidence == "predict_proba":
             prior_weights = np.array([self.prior[klass] for klass in self.classes_])
@@ -167,10 +200,11 @@ class SubjectiveClassifier(BaseEstimator, ClassifierMixin, MetaEstimatorMixin):
             The predicted class.
         """
         check_is_fitted(self, ["posterior_matrix_"])
-        X = check_array(X, estimator=self, dtype=FLOAT_DTYPES)
+        X = validate_data(self, X=X, dtype=FLOAT_DTYPES, reset=False)
+
         return self.classes_[self.predict_proba(X).argmax(axis=1)]
 
     @property
     def classes_(self):
         """Alias for `.classes_` attribute of the underlying estimator."""
-        return self.estimator.classes_
+        return self.estimator_.classes_
